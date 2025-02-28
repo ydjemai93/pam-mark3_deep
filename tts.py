@@ -32,19 +32,19 @@ class ElevenLabsStreamer:
             r = requests.post(url, headers=headers, json=payload, stream=True)
             r.raise_for_status()
 
-            # Lance ffmpeg pour decoder mp3 -> PCM 16bits
             ffmpeg_cmd = [
-                "ffmpeg", "-i", "pipe:0",     # input
-                "-f", "s16le",               # raw 16-bit
+                "ffmpeg",
+                "-i", "pipe:0",    # lecture depuis stdin
+                "-f", "s16le",     # sortie en PCM 16-bit
                 "-acodec", "pcm_s16le",
-                "-ar", "8000",               # 8k
+                "-ar", "8000",     # 8000 Hz, mono
                 "-ac", "1",
-                "pipe:1"
+                "pipe:1"           # écriture sur stdout
             ]
             ffmpeg = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
             def feed_ffmpeg():
-                for chunk in r.iter_content(1024):
+                for chunk in r.iter_content(chunk_size=1024):
                     if chunk:
                         ffmpeg.stdin.write(chunk)
                 ffmpeg.stdin.close()
@@ -64,4 +64,3 @@ class ElevenLabsStreamer:
 
         except Exception as e:
             logging.error(f"ElevenLabs streaming error: {e}")
-
