@@ -2,8 +2,7 @@
 import os
 import logging
 import threading
-import asyncio
-from deepgram import Deepgram  # On n'importe que Deepgram depuis le SDK officiel
+from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents
 
 class DeepgramStreamingSTT:
     def __init__(self, on_partial, on_final):
@@ -18,53 +17,48 @@ class DeepgramStreamingSTT:
             raise ValueError("DEEPGRAM_API_KEY is not set")
         
         # Instancier le client Deepgram
-        dg = Deepgram(api_key)
+        deepgram = DeepgramClient(api_key)
         
-        # Définir les options de streaming en tant que dictionnaire
-        options = {
-            "model": "nova-3",
-            "language": "en-US",         # Deepgram streaming est disponible en anglais
-            "smart_format": True,
-            "encoding": "linear16",      # format audio PCM16
-            "channels": 1,
-            "sample_rate": 8000,         # 8000 Hz pour correspondre à Twilio
-            "interim_results": True,
-            "utterance_end_ms": "1000",
-            "vad_events": True,
-            "endpointing": 300
-        }
+        # Créer la connexion via la méthode listen.websocket.v("1")
+        self.dg_connection = deepgram.listen.websocket.v("1")
         
-        # Créer un nouvel event loop et attendre la connexion Deepgram
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self.dg_connection = loop.run_until_complete(dg.transcription.live(options))
-        
-        # Maintenant, dg_connection est un objet sur lequel on peut appeler .on()
-        self.dg_connection.on("Transcript", self._on_transcript)
-        self.dg_connection.on("UtteranceEnd", self._on_utterance_end)
-        
-        self._loop = loop
+        # Configurer les options Deepgram sous forme d'un objet LiveOptions
+        options = LiveOptions(
+            model="nova-3",
+            language="en-US",         # Deepgram Streaming est disponible en anglais
+            smart_format=True,
+            encoding="linear16",      # PCM16
+            channels=1,
+            sample_rate=8000,         # Pour correspondre à Twilio
+            interim_results=True,
+            utterance_end_ms="1000",
+            vad_events=True,
+            endpointing=300
+        )
+        self.options = options
+
+        # Associer les callbacks pour les événements
+        self.dg_connection.on(LiveTranscriptionEvents.Transcript, self._on_transcript)
+        self.dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, self._on_utterance_end)
 
     def start(self):
-        """Démarre la connexion Deepgram dans un thread séparé."""
+        """Démarre la connexion Deepgram en appelant start(options) dans un thread dédié."""
         def run_connection():
             try:
-                self.dg_connection.start()
+                if not self.dg_connection.start(self.options):
+                    logging.error("Failed to start Deepgram connection")
             except Exception as e:
                 logging.error(f"Deepgram connection error: {e}")
         self._thread = threading.Thread(target=run_connection, daemon=True)
         self._thread.start()
 
     def stop(self):
-        """Ferme la connexion et arrête le thread et l'event loop."""
+        """Ferme la connexion et arrête le thread."""
         self.stop_flag = True
         if self.dg_connection:
             self.dg_connection.finish()
         if self._thread:
             self._thread.join()
-        if self._loop:
-            self._loop.stop()
-            self._loop.close()
 
     def send_audio(self, data: bytes):
         """Envoie un chunk audio (PCM16) à Deepgram."""
@@ -75,7 +69,7 @@ class DeepgramStreamingSTT:
                 logging.error(f"Deepgram send error: {e}")
 
     def _on_transcript(self, result, **kwargs):
-        """Callback appelé lors de la réception d'une transcription (partielle ou finale)."""
+        """Callback déclenché à chaque résultat de transcription (partiel ou final)."""
         try:
             transcript = result["channel"]["alternatives"][0]["transcript"]
             if result.get("is_final", False):
