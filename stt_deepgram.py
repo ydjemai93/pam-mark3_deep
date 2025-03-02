@@ -4,6 +4,7 @@ import logging
 import threading
 import asyncio
 from deepgram import Deepgram
+from deepgram.transcription import LiveTranscriptionEvents
 
 class DeepgramStreamingSTT:
     def __init__(self, on_partial, on_final):
@@ -11,96 +12,87 @@ class DeepgramStreamingSTT:
         self.on_final = on_final
         self.stop_flag = False
         self.dg_connection = None
+        self._loop = None
         self._thread = None
 
         api_key = os.getenv("DEEPGRAM_API_KEY")
         if not api_key:
             raise ValueError("DEEPGRAM_API_KEY is not set")
         
-        # Instancier le client Deepgram
-        deepgram = Deepgram(api_key)
-        
-        # Définir les options de streaming sous forme de dictionnaire
-        options = {
+        self.deepgram = Deepgram(api_key)
+        self.options = {
             "model": "nova-3",
-            "language": "en-US",         # Deepgram Streaming fonctionne en anglais
+            "language": "en-US",
             "smart_format": True,
-            "encoding": "linear16",      # PCM16
+            "encoding": "linear16",
             "channels": 1,
-            "sample_rate": 8000,         # Pour correspondre à Twilio
+            "sample_rate": 8000,
             "interim_results": True,
-            "utterance_end_ms": "1000",  # 1000 ms de silence pour clore une utterance
+            "utterance_end_ms": "1000",
             "vad_events": True,
             "endpointing": 300
         }
-        
-        # Créer un nouvel event loop pour obtenir la connexion Deepgram
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        # Ici, live(options) est une coroutine qu'il faut await pour obtenir l'objet de connexion.
-        self.dg_connection = loop.run_until_complete(deepgram.transcription.live(options))
-        self._loop = loop
 
-    async def _async_listen(self):
-        """
-        Itère sur les messages reçus sur la connexion Deepgram en streaming.
-        Pour chaque message, on analyse le type et on appelle les callbacks appropriés.
-        """
+    async def _async_connect(self):
+        """Établir la connexion Deepgram et configurer les handlers"""
         try:
-            async for message in self.dg_connection:
-                # Exemple de message "Results" :
-                # {
-                #   "type": "Results",
-                #   "channel": {
-                #       "alternatives": [ { "transcript": "Hello world", ... } ]
-                #   },
-                #   "is_final": True, ...
-                # }
-                msg_type = message.get("type")
-                if msg_type == "Results":
-                    transcript = message.get("channel", {}) \
-                                         .get("alternatives", [{}])[0] \
-                                         .get("transcript", "")
-                    if transcript:
-                        if message.get("is_final", False):
-                            if self.on_final:
-                                self.on_final(transcript)
-                        else:
-                            if self.on_partial:
-                                self.on_partial(transcript)
-                elif msg_type == "UtteranceEnd":
-                    self._on_utterance_end(message)
-                # Vous pouvez ajouter d'autres cas selon vos besoins.
+            self.dg_connection = await self.deepgram.transcription.live(self.options)
+            
+            # Configurer les handlers d'événements
+            self.dg_connection.on(LiveTranscriptionEvents.Transcript, self._on_transcript)
+            self.dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, self._on_utterance_end)
+            self.dg_connection.on(LiveTranscriptionEvents.Close, self._on_close)
+            
+            # Maintenir la connexion active
+            while not self.stop_flag:
+                await asyncio.sleep(1)
+                
         except Exception as e:
-            logging.error(f"Deepgram async listen error: {e}")
+            logging.error(f"Deepgram connection error: {e}")
+
+    def _on_transcript(self, message):
+        """Handler pour les résultats de transcription"""
+        transcript = message.get('channel', {}).get('alternatives', [{}])[0].get('transcript', '')
+        if transcript:
+            if message.get('is_final', False):
+                if self.on_final:
+                    self.on_final(transcript)
+            else:
+                if self.on_partial:
+                    self.on_partial(transcript)
 
     def _on_utterance_end(self, data):
         logging.info(f"Utterance ended: {data}")
 
+    def _on_close(self, data):
+        logging.info(f"Deepgram connection closed: {data}")
+
     def start(self):
-        """Démarre l'écoute en streaming dans un thread séparé."""
-        def run_listener():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            new_loop.run_until_complete(self._async_listen())
-        self._thread = threading.Thread(target=run_listener, daemon=True)
+        """Démarrer la connexion dans un thread asyncio dédié"""
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
+    def _run_loop(self):
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._async_connect())
+
     def stop(self):
-        """Arrête la connexion Deepgram et ferme le thread et l'event loop."""
+        """Arrêter la connexion"""
         self.stop_flag = True
         if self.dg_connection:
-            self.dg_connection.finish()
+            # Appeler finish() de manière asynchrone
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self.dg_connection.finish())
+            )
         if self._thread:
-            self._thread.join()
+            self._thread.join(timeout=1)
         if self._loop:
-            self._loop.stop()
             self._loop.close()
 
     def send_audio(self, data: bytes):
-        """Envoie un chunk audio (PCM16) à Deepgram."""
-        if self.dg_connection:
-            try:
-                self.dg_connection.send(data)
-            except Exception as e:
-                logging.error(f"Deepgram send error: {e}")
+        """Envoyer des données audio de manière thread-safe"""
+        if self.dg_connection and not self.stop_flag:
+            self._loop.call_soon_threadsafe(
+                lambda: self.dg_connection.send(data)
+            )
