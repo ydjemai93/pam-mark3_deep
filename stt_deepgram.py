@@ -1,4 +1,4 @@
-# stt_deepgram.py
+# stt_deepgram.py (correction finale)
 import os
 import logging
 import threading
@@ -7,8 +7,7 @@ from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
     LiveTranscriptionEvents,
-    LiveOptions,
-    LiveClient
+    LiveOptions
 )
 
 class DeepgramStreamingSTT:
@@ -24,14 +23,13 @@ class DeepgramStreamingSTT:
         if not api_key:
             raise ValueError("DEEPGRAM_API_KEY is not set")
         
-        # Configuration du client Deepgram v3
+        # Configuration corrigée
         config = DeepgramClientOptions(
             api_key=api_key,
             options={"keepalive": "true"}
         )
         self.client = DeepgramClient(config=config)
-
-        # Options de streaming
+        
         self.options = LiveOptions(
             model="nova-3",
             language="en-US",
@@ -46,23 +44,21 @@ class DeepgramStreamingSTT:
         )
 
     async def _async_connect(self):
-        """Établir la connexion Deepgram et configurer les handlers"""
         try:
-            self.dg_connection = self.client.listen.live.v("1")
+            # Initialisation corrigée
+            self.dg_connection = self.client.listen.live()
             
-            # Configurer les handlers d'événements
             self.dg_connection.on(LiveTranscriptionEvents.Transcript, self._on_transcript)
             self.dg_connection.on(LiveTranscriptionEvents.Close, self._on_close)
 
-            # Démarrer la connexion
-            await self.dg_connection.start(self.options)
+            # Appel SYNCHRONE à start()
+            self.dg_connection.start(self.options)
 
-            # Maintenir la connexion active
             while not self.stop_flag:
                 await asyncio.sleep(0.1)
                 
         except Exception as e:
-            logging.error(f"Deepgram connection error: {e}")
+            logging.error(f"Deepgram error: {e}")
             raise
 
     def _on_transcript(self, connection, message):
