@@ -2,7 +2,7 @@
 import os
 import logging
 import threading
-from deepgram import Deepgram, LiveOptions, LiveTranscriptionEvents
+from deepgram import Deepgram
 
 class DeepgramStreamingSTT:
     def __init__(self, on_partial, on_final):
@@ -18,27 +18,27 @@ class DeepgramStreamingSTT:
         
         # Instancier le client Deepgram
         dg = Deepgram(api_key)
+
+        # Définir les options sous forme de dictionnaire
+        options = {
+            "model": "nova-3",
+            "language": "en-US",         # Deepgram Streaming est disponible en anglais
+            "smart_format": True,
+            "encoding": "linear16",      # PCM16
+            "channels": 1,
+            "sample_rate": 8000,         # 8000 Hz pour correspondre à Twilio
+            "interim_results": True,
+            "utterance_end_ms": 1000,    # fin d'utterance après 1000 ms de silence
+            "vad_events": True,
+            "endpointing": 300
+        }
         
-        # Configurer les options pour la transcription en direct
-        options = LiveOptions(
-            model="nova-3",
-            language="en-US",       # Deepgram streaming est disponible en anglais
-            smart_format=True,
-            encoding="linear16",    # format audio PCM16
-            channels=1,
-            sample_rate=8000,       # à ajuster selon le flux (par exemple, 8000 Hz si c'est le cas)
-            interim_results=True,
-            utterance_end_ms="1000",
-            vad_events=True,
-            endpointing=300
-        )
-        
-        # Créer la connexion en mode streaming
+        # Créer la connexion en mode streaming via l'API Deepgram
         self.dg_connection = dg.transcription.live(options)
         
-        # Assigner les callbacks pour les événements Deepgram
-        self.dg_connection.on(LiveTranscriptionEvents.Transcript, self._on_transcript)
-        self.dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, self._on_utterance_end)
+        # Associer les callbacks aux événements en utilisant leurs noms
+        self.dg_connection.on("Transcript", self._on_transcript)
+        self.dg_connection.on("UtteranceEnd", self._on_utterance_end)
 
     def start(self):
         def run_connection():
