@@ -4,7 +4,7 @@ gevent==23.9.1
 simple_websocket==0.10.1
 openai==0.28.0
 requests==2.31.0
-deepgram-sdk>=3.0.0
+deepgram-sdk>=3.1.0
 pydub==0.25.1
 gunicorn==21.2.0
 python-dotenv==1.0.0
