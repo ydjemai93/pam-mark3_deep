@@ -1,4 +1,4 @@
-# stt_deepgram.py (correction finale)
+# stt_deepgram.py
 import os
 import logging
 import threading
@@ -23,13 +23,11 @@ class DeepgramStreamingSTT:
         if not api_key:
             raise ValueError("DEEPGRAM_API_KEY is not set")
         
-        # Configuration corrigée
-        config = DeepgramClientOptions(
-            api_key=api_key,
-            options={"keepalive": "true"}
-        )
+        # Configuration du client Deepgram
+        config = DeepgramClientOptions(api_key=api_key)
         self.client = DeepgramClient(config=config)
         
+        # Options de streaming
         self.options = LiveOptions(
             model="nova-3",
             language="en-US",
@@ -44,58 +42,64 @@ class DeepgramStreamingSTT:
         )
 
     async def _async_connect(self):
+        """Établit la connexion WebSocket avec Deepgram"""
         try:
-            # Initialisation corrigée
-            self.dg_connection = self.client.listen.live()
+            # Initialisation de la connexion live (version 1 de l'API)
+            self.dg_connection = self.client.listen.live.v1()
             
+            # Configuration des handlers d'événements
             self.dg_connection.on(LiveTranscriptionEvents.Transcript, self._on_transcript)
             self.dg_connection.on(LiveTranscriptionEvents.Close, self._on_close)
 
-            # Appel SYNCHRONE à start()
+            # Démarrage de la connexion (synchrone)
             self.dg_connection.start(self.options)
 
+            # Boucle de maintien de la connexion
             while not self.stop_flag:
                 await asyncio.sleep(0.1)
                 
         except Exception as e:
-            logging.error(f"Deepgram error: {e}")
+            logging.error(f"Erreur Deepgram : {e}")
             raise
 
     def _on_transcript(self, connection, message):
-        """Handler pour les résultats de transcription"""
-        transcript = message.channel.alternatives[0].transcript
-        if not transcript:
-            return
+        """Gère les événements de transcription"""
+        try:
+            transcript = message.channel.alternatives[0].transcript
+            if not transcript:
+                return
 
-        if message.is_final:
-            if self.on_final:
+            if message.is_final:
                 self.on_final(transcript)
-        else:
-            if self.on_partial:
+            else:
                 self.on_partial(transcript)
+        except Exception as e:
+            logging.error(f"Erreur de transcription : {e}")
 
     def _on_close(self, connection, message):
-        logging.info(f"Deepgram connection closed: {message}")
+        """Gère la fermeture de la connexion"""
+        logging.info(f"Connexion Deepgram fermée : {message}")
 
     def start(self):
-        """Démarrer la connexion dans un thread asyncio dédié"""
+        """Démarre le thread de gestion de la connexion"""
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
-            target=self._run_loop, 
+            target=self._run_loop,
             daemon=True
         )
         self._thread.start()
 
     def _run_loop(self):
+        """Lance la boucle d'événements asyncio"""
         asyncio.set_event_loop(self._loop)
         self._loop.run_until_complete(self._async_connect())
 
     def stop(self):
-        """Arrêter la connexion"""
+        """Arrête proprement la connexion"""
         self.stop_flag = True
         if self.dg_connection:
             self._loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self.dg_connection.finish())
+                lambda: self.dg_connection.finish()
             )
         if self._thread:
             self._thread.join(timeout=2)
@@ -103,7 +107,7 @@ class DeepgramStreamingSTT:
             self._loop.close()
 
     def send_audio(self, data: bytes):
-        """Envoyer des données audio de manière thread-safe"""
+        """Envoie des données audio à Deepgram de manière thread-safe"""
         if self.dg_connection and not self.stop_flag:
             self._loop.call_soon_threadsafe(
                 lambda: self.dg_connection.send(data)
