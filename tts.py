@@ -1,4 +1,3 @@
-# tts.py
 import os
 import requests
 import subprocess
@@ -22,45 +21,16 @@ class ElevenLabsStreamer:
         }
         payload = {
             "text": text,
-            "voice_settings": {
-                "stability": 0.3,
-                "similarity_boost": 0.75
-            }
+            "voice_settings": {"stability": 0.3, "similarity_boost": 0.75}
         }
 
         try:
             r = requests.post(url, headers=headers, json=payload, stream=True)
             r.raise_for_status()
 
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-i", "pipe:0",    # lecture depuis stdin
-                "-f", "s16le",     # sortie en PCM 16-bit
-                "-acodec", "pcm_s16le",
-                "-ar", "8000",     # 8000 Hz, mono
-                "-ac", "1",
-                "pipe:1"           # écriture sur stdout
-            ]
-            ffmpeg = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-
-            def feed_ffmpeg():
-                for chunk in r.iter_content(chunk_size=1024):
-                    if chunk:
-                        ffmpeg.stdin.write(chunk)
-                ffmpeg.stdin.close()
-
-            feed_thread = threading.Thread(target=feed_ffmpeg, daemon=True)
-            feed_thread.start()
-
-            while True:
-                data = ffmpeg.stdout.read(1024)
-                if not data:
-                    break
+            for chunk in r.iter_content(chunk_size=1024):
                 if self.on_audio_chunk:
-                    self.on_audio_chunk(data)
-
-            ffmpeg.stdout.close()
-            ffmpeg.wait()
+                    self.on_audio_chunk(chunk)
 
         except Exception as e:
             logging.error(f"ElevenLabs streaming error: {e}")
