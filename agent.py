@@ -2,6 +2,9 @@
 import uuid
 import logging
 import threading
+import json
+import audioop
+import base64
 
 from stt_deepgram import DeepgramStreamingSTT
 from llm import gpt4_stream
@@ -107,16 +110,27 @@ class StreamingAgent:
         Envoi d'un chunk audio encodé en µ-law vers la websocket Twilio.
         Cette fonction est appelée par le TTS à chaque chunk généré.
         """
-        import audioop, base64, json
         sess = self.sessions.get(session_id)
         if not sess or sess["interrupt"]:
             return
+
         ws = sess["ws"]
-        # Convertir PCM 16-bit en µ-law (format attendu par Twilio)
-        ulaw_data = audioop.lin2ulaw(pcm_data, 2)
-        # Encoder en base64 pour l'envoi JSON
-        payload_b64 = base64.b64encode(ulaw_data).decode("utf-8")
-        ws.send(json.dumps({
-            "event": "media",
-            "media": {"payload": payload_b64}
-        }))
+
+        # Vérifier si la websocket est fermée
+        if hasattr(ws, "closed") and ws.closed:
+            logging.info(f"[Session {session_id}] WebSocket is closed; skipping sending audio chunk")
+            return
+
+        try:
+            # Convertir PCM 16-bit en µ-law (format attendu par Twilio)
+            ulaw_data = audioop.lin2ulaw(pcm_data, 2)
+            # Encoder en base64 pour l'envoi JSON
+            payload_b64 = base64.b64encode(ulaw_data).decode("utf-8")
+            message = json.dumps({
+                "event": "media",
+                "media": {"payload": payload_b64}
+            })
+            ws.send(message)
+            logging.debug(f"[Session {session_id}] Sent audio chunk of size {len(pcm_data)} bytes")
+        except Exception as e:
+            logging.error(f"[Session {session_id}] Error sending audio chunk: {e}")
