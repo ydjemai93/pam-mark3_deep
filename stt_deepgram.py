@@ -1,86 +1,106 @@
-import os
+import uuid
 import logging
-# Suppression de l'import obsolète Deepgram et LiveTranscriptionEvents
-# from deepgram import Deepgram        # Ancien
-# from deepgram.transcription import LiveTranscriptionEvents  # Ancien
+import threading
 
-# Nouveaux imports pour la v3.1.0
-from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
+from stt_deepgram import DeepgramStreamingSTT
+from llm import gpt4_stream
+from tts import ElevenLabsStreamer
 
-class DeepgramStreamingSTT:
-    def __init__(self, on_partial, on_final):
-        self.on_partial = on_partial
-        self.on_final = on_final
-        self.stop_flag = False
-        self.dg_connection = None
+class StreamingAgent:
+    def __init__(self):
+        self.sessions = {}
 
-        api_key = os.getenv("DEEPGRAM_API_KEY")
-        if not api_key:
-            raise ValueError("DEEPGRAM_API_KEY is not set")
-        
-        # Instancier le nouveau client Deepgram (v3)
-        deepgram_client = DeepgramClient(api_key)
-        
-        # Préparer les options de transcription en utilisant LiveOptions
-        options = LiveOptions(
-            model="nova-3",
-            language="en-US",
-            smart_format=True,
-            encoding="linear16",    # PCM16
-            channels=1,
-            sample_rate=8000,       # correspond à Twilio
-            interim_results=True,
-            utterance_end_ms="1000",  # 1000 ms de silence pour clore une utterance
-            vad_events=True,
-            endpointing=300
+    def start_session(self, ws):
+        session_id = str(uuid.uuid4())
+        logging.info(f"[Session {session_id}] start")
+
+        sess = {
+            "ws": ws,
+            "speaking": False,
+            "interrupt": False,
+            "conversation": [
+                {"role": "system", "content": "You are a helpful assistant."},
+            ]
+        }
+
+        # Instanciation du TTS (ElevenLabs)
+        tts = ElevenLabsStreamer(
+            on_audio_chunk=lambda pcm: self.send_audio_chunk(session_id, pcm)
         )
-        
-        # Créer la connexion WebSocket Deepgram (API v1)
-        self.dg_connection = deepgram_client.listen.websocket.v("1")  # **Nouveau** :contentReference[oaicite:0]{index=0}
-        
-        # Définir les callbacks pour les événements de transcription
-        def handle_transcript(_conn, result, **kwargs):
-            """Callback pour chaque transcription partielle/finale."""
-            if result is None:
-                return
-            # Extraire le texte transcrit du résultat
-            transcript = result.channel.alternatives[0].transcript if result.channel.alternatives else ""
-            if transcript:
-                if hasattr(result, "is_final") and result.is_final:
-                    # Résultat final
-                    if self.on_final:
-                        self.on_final(transcript)
-                else:
-                    # Résultat partiel
-                    if self.on_partial:
-                        self.on_partial(transcript)
-        
-        def handle_error(_conn, error, **kwargs):
-            """Callback en cas d’erreur de la transcription."""
-            logging.error(f"Deepgram error: {error}")
-        
-        def handle_utterance_end(_conn, utt_end, **kwargs):
-            """Callback à la fin d’une utterance (pause détectée)."""
-            self._on_utterance_end(utt_end)
-        
-        # Enregistrer les callbacks sur les événements correspondants
-        self.dg_connection.on(LiveTranscriptionEvents.Transcript, handle_transcript)   # **Nouveau** :contentReference[oaicite:1]{index=1}
-        self.dg_connection.on(LiveTranscriptionEvents.Error, handle_error)             # **Nouveau**
-        self.dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, handle_utterance_end)  # **Nouveau**
+        sess["tts"] = tts
 
-        # (Optionnel) on peut aussi écouter l’ouverture/fermeture si besoin :
-        # self.dg_connection.on(LiveTranscriptionEvents.Open, lambda *args, **kw: logging.info("Connexion Deepgram ouverte"))
-        # self.dg_connection.on(LiveTranscriptionEvents.Close, lambda *args, **kw: logging.info("Connexion Deepgram fermée"))
+        # Instanciation du STT (Deepgram)
+        stt = DeepgramStreamingSTT(
+            on_partial=lambda text: self.on_stt_partial(session_id, text),
+            on_final=lambda text: self.on_stt_final(session_id, text)
+        )
+        sess["stt"] = stt
 
-        # Conserver les options pour démarrer plus tard
-        self.options = options
+        # Démarrer l'écoute en streaming
+        stt.start()
 
-    def start(self):
-        """Démarre l’écoute en streaming."""
-        # Lancement de la transcription live (non bloquant)
-        self.dg_connection.start(self.options)  # **Nouveau** – lance le WebSocket :contentReference[oaicite:2]{index=2}&#8203;:contentReference[oaicite:3]{index=3}
+        self.sessions[session_id] = sess
+        return session_id
 
-    def stop(self):
-        """Arrête la connexion Deepgram et ferme proprement."""
-        if self.dg_connection:
-            self.dg_connection.finish()  # ferme la connexion WebSocket
+    def end_session(self, session_id):
+        """Arrête une session active et libère les ressources"""
+        sess = self.sessions.pop(session_id, None)
+        if sess:
+            logging.info(f"[Session {session_id}] ended")
+            sess["stt"].stop()
+
+    def on_user_audio_chunk(self, session_id, chunk_pcm):
+        """Reçoit un morceau audio de Twilio et l'envoie à Deepgram"""
+        sess = self.sessions.get(session_id)
+        if not sess:
+            return
+        # Si l'IA parle, on déclenche le barge-in
+        if sess["speaking"]:
+            sess["interrupt"] = True
+            logging.info(f"[Session {session_id}] barge-in triggered")
+        sess["stt"].send_audio(chunk_pcm)
+
+    def on_stt_partial(self, session_id, text):
+        """Callback pour les résultats intermédiaires de la reconnaissance vocale"""
+        logging.debug(f"[Session {session_id}] STT partial: {text}")
+
+    def on_stt_final(self, session_id, text):
+        """Callback pour les résultats finaux de la reconnaissance vocale"""
+        sess = self.sessions.get(session_id)
+        if not sess or not text.strip():
+            return
+
+        sess["conversation"].append({"role": "user", "content": text})
+
+        def run_gpt():
+            sess["speaking"] = True
+            sess["interrupt"] = False
+            partial_response = ""
+            for token in gpt4_stream(sess["conversation"]):
+                if sess["interrupt"]:
+                    logging.info(f"[Session {session_id}] GPT stream interrupted")
+                    break
+                partial_response += token
+                sess["tts"].stream_text(token)
+
+            if not sess["interrupt"]:
+                sess["conversation"].append({"role": "assistant", "content": partial_response})
+
+            sess["speaking"] = False
+
+        t = threading.Thread(target=run_gpt, daemon=True)
+        t.start()
+
+    def send_audio_chunk(self, session_id, pcm_data):
+        """Envoie un chunk audio encodé en u-law vers Twilio"""
+        import audioop, base64, json
+        sess = self.sessions.get(session_id)
+        if not sess or sess["interrupt"]:
+            return
+        ws = sess["ws"]
+        ulaw_data = audioop.lin2ulaw(pcm_data, 2)
+        payload_b64 = base64.b64encode(ulaw_data).decode("utf-8")
+        ws.send(json.dumps({
+            "event": "media",
+            "media": {"payload": payload_b64}
+        }))
