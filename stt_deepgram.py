@@ -19,7 +19,7 @@ class DeepgramStreamingSTT:
         if not api_key:
             raise ValueError("DEEPGRAM_API_KEY is not set")
         
-        # Créer le client Deepgram pour la version 3.1.0
+        # Création du client Deepgram pour la version 3.1.0
         self.deepgram_client = DeepgramClient(api_key)
         
         # Préparer les options de transcription
@@ -31,15 +31,14 @@ class DeepgramStreamingSTT:
             channels=1,
             sample_rate=8000,
             interim_results=True,
-            utterance_end_ms=1000,  # valeur entière, pas de chaîne
+            utterance_end_ms=1000,  # valeur entière
             vad_events=True,
             endpointing=300
         )
 
     async def _async_listen(self):
         """
-        Cette coroutine permet de maintenir l'event loop actif afin que les callbacks
-        Deepgram soient traités. Ici, on attend indéfiniment en petites pauses.
+        Maintient l'event loop actif afin de traiter les callbacks Deepgram.
         """
         try:
             while not self.stop_flag:
@@ -55,9 +54,9 @@ class DeepgramStreamingSTT:
             self._loop = loop
             logging.info("Connexion au service Deepgram en cours...")
             try:
-                # Établir la connexion WebSocket Deepgram sur ce loop
+                # Établir la connexion WebSocket Deepgram en utilisant la méthode connect()
                 self.dg_connection = loop.run_until_complete(
-                    self.deepgram_client.transcription.live(self.options)
+                    self.deepgram_client.listen.websocket.v("1").connect(self.options)
                 )
                 logging.info("Connexion Deepgram établie avec succès.")
             except Exception as e:
