@@ -52,15 +52,19 @@ class StreamingAgent:
             logging.info(f"[Session {session_id}] ended")
 
     def on_user_audio_chunk(self, session_id, chunk_pcm):
-    sess = self.sessions.get(session_id)
-    if not sess:
-        return
-    # Pour tester, on désactive temporairement le barge-in :
-    # if sess["speaking"]:
-    #     sess["interrupt"] = True
-    #     logging.info(f"[Session {session_id}] barge‑in triggered")
-    sess["stt"].send_audio(chunk_pcm)
-
+        """
+        Méthode appelée à chaque chunk audio reçu de l'utilisateur.
+        Envoie l'audio au service STT et gère le barge-in si l'agent parlait.
+        """
+        sess = self.sessions.get(session_id)
+        if not sess:
+            return
+        # Si l'IA est en train de parler, on déclenche l'interruption (barge-in)
+        if sess["speaking"]:
+            sess["interrupt"] = True
+            logging.info(f"[Session {session_id}] barge‑in triggered by user speech")
+        # Envoyer le chunk audio au service de reconnaissance vocale (STT)
+        sess["stt"].send_audio(chunk_pcm)
 
     def on_stt_partial(self, session_id, text):
         """Callback pour les transcriptions partielles du STT (optionnel, ici juste log)."""
@@ -96,7 +100,6 @@ class StreamingAgent:
                 sess["conversation"].append({"role": "assistant", "content": partial_response})
             sess["speaking"] = False
 
-        # Lancer la génération de réponse dans un thread séparé pour ne pas bloquer
         t = threading.Thread(target=run_gpt, daemon=True)
         t.start()
 
