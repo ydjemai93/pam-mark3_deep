@@ -1,4 +1,3 @@
-# llm.py
 import openai
 import os
 
