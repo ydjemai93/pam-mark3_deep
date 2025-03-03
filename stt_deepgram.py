@@ -3,7 +3,7 @@ import os
 import logging
 import asyncio
 import threading
-from deepgram import Deepgram, LiveOptions, LiveTranscriptionEvents
+from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents
 
 class DeepgramStreamingSTT:
     def __init__(self, on_partial, on_final):
@@ -17,11 +17,11 @@ class DeepgramStreamingSTT:
         api_key = os.getenv("DEEPGRAM_API_KEY")
         if not api_key:
             raise ValueError("DEEPGRAM_API_KEY is not set")
-
-        # Création du client Deepgram
-        deepgram = Deepgram(api_key)
-        # Obtenir le client WebSocket pour la version "1"
-        self.dg_connection = deepgram.listen.websocket.v("1")
+        
+        # Création du client Deepgram (version 3)
+        deepgram_client = DeepgramClient(api_key)
+        # Obtenir l'objet WebSocket pour la version "1"
+        self.dg_connection = deepgram_client.listen.websocket.v("1")
 
     def _initialize_connection(self):
         # Attacher les gestionnaires d'événements pour surveiller la connexion
