@@ -18,28 +18,28 @@ class DeepgramStreamingSTT:
         if not api_key:
             raise ValueError("DEEPGRAM_API_KEY is not set")
         
-        # Création du client Deepgram (version 3)
+        # Création du client Deepgram (version 3.10.0)
         deepgram_client = DeepgramClient(api_key)
         # Obtenir l'objet WebSocket pour la version "1"
         self.dg_connection = deepgram_client.listen.websocket.v("1")
 
     def _initialize_connection(self):
-        # Attacher les gestionnaires d'événements pour surveiller la connexion
+        # Attacher les gestionnaires d'événements avec des lambdas acceptant *args et **kwargs
         self.dg_connection.on(
             LiveTranscriptionEvents.Open,
-            lambda: logging.info("Deepgram WebSocket opened")
+            lambda *args, **kwargs: logging.info("Deepgram WebSocket opened")
         )
         self.dg_connection.on(
             LiveTranscriptionEvents.Close,
-            lambda code=None: logging.info(f"Deepgram WebSocket closed (code={code})")
+            lambda *args, **kwargs: logging.info(f"Deepgram WebSocket closed, args: {args}, kwargs: {kwargs}")
         )
         self.dg_connection.on(
             LiveTranscriptionEvents.Error,
-            lambda error=None: logging.error(f"Deepgram WebSocket error: {error}")
+            lambda *args, **kwargs: logging.error(f"Deepgram WebSocket error, args: {args}, kwargs: {kwargs}")
         )
-        
-        # Gestionnaire pour les transcriptions
-        def handle_transcript(result, **kwargs):
+
+        # Gestionnaire pour les transcriptions : on attend deux paramètres (connection, result)
+        def handle_transcript(conn, result, **kwargs):
             try:
                 transcript = result.channel.alternatives[0].transcript
                 if transcript:
@@ -58,9 +58,9 @@ class DeepgramStreamingSTT:
         )
         self.dg_connection.on(
             LiveTranscriptionEvents.UtteranceEnd,
-            lambda metadata, **kwargs: self._on_utterance_end(metadata)
+            lambda *args, **kwargs: self._on_utterance_end(*args, **kwargs)
         )
-        
+
         # Préparer les options de transcription
         live_options = LiveOptions(
             model="nova-3",
@@ -74,15 +74,15 @@ class DeepgramStreamingSTT:
             vad_events=True,
             endpointing=300
         )
-        
+
         # Démarrer la connexion WebSocket Deepgram en utilisant start()
         success = self.dg_connection.start(live_options)
         if not success:
             logging.error("Deepgram WebSocket connection failed to start")
             raise RuntimeError("Unable to start Deepgram STT WebSocket connection")
-    
-    def _on_utterance_end(self, metadata):
-        logging.info(f"Utterance ended: {metadata}")
+
+    def _on_utterance_end(self, *args, **kwargs):
+        logging.info(f"Utterance ended: args={args}, kwargs={kwargs}")
 
     def start(self):
         """Démarre la connexion Deepgram dans un thread dédié avec son event loop."""
