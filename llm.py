@@ -1,29 +1,29 @@
 # llm.py
 import os
-import queue
-import threading
+import logging
 from openai import OpenAI
 
+# Configuration du client OpenAI
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def gpt4_stream(messages):
-    """Génère un flux de tokens via l'API Assistants de OpenAI (version moderne)"""
+    """
+    Génère un flux de réponse GPT-4 en utilisant l'API ChatCompletion
+    Version simplifiée et compatible avec openai>=1.12.0
+    """
     try:
-        # Créer un thread avec l'historique de conversation
-        thread = client.beta.threads.create(messages=messages)
-        
-        # Lancer l'exécution avec streaming
-        with client.beta.threads.runs.stream(
-            thread_id=thread.id,
-            assistant_id="asst_Tzai3Ek76LoSaoBTASSYLIqF",
-        ) as stream:
-            for event in stream:
-                if event.event == "thread.message.delta":
-                    # Récupérer le delta de contenu
-                    content_delta = event.data.delta.content[0].text
-                    if content_delta.value:
-                        yield content_delta.value
-                        
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=messages,
+            stream=True,
+            temperature=0.7
+        )
+
+        for chunk in response:
+            content = chunk.choices[0].delta.content
+            if content:
+                yield content
+
     except Exception as e:
         logging.error(f"Erreur GPT-4: {e}")
         yield ""
