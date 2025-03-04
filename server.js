@@ -12,11 +12,11 @@ const HttpDispatcher = require("httpdispatcher");
 const WebSocketServer = require("websocket").server;
 const dispatcher = new HttpDispatcher();
 
-// Utilisation du port défini dans les variables d'environnement (Railway fournit process.env.PORT)
+// Utilisation du port défini dans process.env.PORT (Railway fournit cette variable) ou 8080 par défaut
 const HTTP_SERVER_PORT = process.env.PORT || 8080;
 let streamSid = ''; // Pour stocker l'ID de la session de streaming
 
-// Créer un serveur HTTP qui gère les requêtes
+// Crée le serveur HTTP pour gérer les requêtes
 const wsserver = http.createServer(handleRequest);
 
 // Deepgram Speech to Text
@@ -28,10 +28,10 @@ let keepAlive;
 const OpenAI = require('openai');
 const openai = new OpenAI();
 
-// Deepgram Text to Speech Websocket URL (utilise une variable d'environnement si nécessaire)
+// Deepgram Text to Speech Websocket URL (possibilité de le définir via DEEPGRAM_TTS_WS_URL)
 const deepgramTTSWebsocketURL = process.env.DEEPGRAM_TTS_WS_URL || 'wss://api.deepgram.com/v1/speak?encoding=mulaw&sample_rate=8000&container=none';
 
-// Performance Timings
+// Performance Timings et autres variables
 let llmStart = 0;
 let ttsStart = 0;
 let firstByte = true;
@@ -59,17 +59,19 @@ dispatcher.onGet("/", function (req, res) {
 
 /*
   Endpoint pour le TwiML
-  Ici, nous lisons le fichier streams.xml, et nous remplaçons le placeholder
-  "<YOUR NGROK URL>" par la valeur de la variable SERVER (définie dans .env).
+  Lecture du fichier streams.xml, remplacement du placeholder <YOUR NGROK URL>
+  par la variable SERVER (sans protocole) définie dans le fichier .env.
 */
 dispatcher.onPost("/twiml", function (req, res) {
   let filePath = path.join(__dirname, "templates", "streams.xml");
   try {
     let streamsXML = fs.readFileSync(filePath, "utf8");
-    // Remplacer le placeholder par la valeur de SERVER dans .env
-    const serverUrl = process.env.SERVER || "localhost";
+    // Récupérer le domaine du serveur depuis process.env.SERVER
+    let serverUrl = process.env.SERVER || "localhost";
+    // Retirer "http://" ou "https://" s'ils sont présents
+    serverUrl = serverUrl.replace(/^https?:\/\//, '');
+    // Remplacer le placeholder dans le fichier streams.xml
     streamsXML = streamsXML.replace("<YOUR NGROK URL>", serverUrl);
-
     res.writeHead(200, {
       "Content-Type": "text/xml",
       "Content-Length": Buffer.byteLength(streamsXML)
@@ -96,7 +98,7 @@ mediaws.on("connect", function (connection) {
 });
 
 /*
-  Classe pour gérer le flux média Twilio (bidirectionnel)
+  Classe pour gérer le flux média (Twilio bidirectionnel)
 */
 class MediaStream {
   constructor(connection) {
@@ -151,9 +153,9 @@ class MediaStream {
   }
 }
 
-// (Les fonctions promptLLM, containsAnyChars, setupDeepgramWebsocket et setupDeepgram
-// restent inchangées et sont définies ci-dessous, identiques à la version précédente)
-
+/*
+  OpenAI Streaming LLM (invoqué dans deepgram STT)
+*/
 async function promptLLM(mediaStream, prompt) {
   const stream = openai.beta.chat.completions.stream({
     model: 'gpt-3.5-turbo',
@@ -192,6 +194,7 @@ async function promptLLM(mediaStream, prompt) {
       }
     }
   }
+  // Indiquer à la websocket TTS que la génération est terminée
   mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ 'type': 'Flush' }));
 }
 
@@ -200,6 +203,9 @@ function containsAnyChars(str) {
   return strArray.some(char => chars_to_check.includes(char));
 }
 
+/*
+  Deepgram Streaming Text to Speech Websocket
+*/
 const setupDeepgramWebsocket = (mediaStream) => {
   const options = {
     headers: {
@@ -234,9 +240,7 @@ const setupDeepgramWebsocket = (mediaStream) => {
       const message = {
         event: 'media',
         streamSid: streamSid,
-        media: {
-          payload,
-        },
+        media: { payload },
       };
       const messageJSON = JSON.stringify(message);
       mediaStream.connection.sendUTF(messageJSON);
@@ -254,6 +258,9 @@ const setupDeepgramWebsocket = (mediaStream) => {
   return ws;
 };
 
+/*
+  Deepgram Streaming Speech to Text
+*/
 const setupDeepgram = (mediaStream) => {
   let is_finals = [];
   const deepgram = deepgramClient.listen.live({
