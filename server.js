@@ -12,11 +12,12 @@ const HttpDispatcher = require("httpdispatcher");
 const WebSocketServer = require("websocket").server;
 const dispatcher = new HttpDispatcher();
 
-// Utilisation du port défini dans les variables d'environnement, ou 8080 par défaut
+// Utilisation du port défini dans les variables d'environnement (Railway fournit process.env.PORT)
 const HTTP_SERVER_PORT = process.env.PORT || 8080;
-let streamSid = ''; // Variable pour stocker l'ID de la session de streaming
+let streamSid = ''; // Pour stocker l'ID de la session de streaming
 
-const wsserver = http.createServer(handleRequest); // Crée un serveur HTTP pour gérer les requêtes
+// Créer un serveur HTTP qui gère les requêtes
+const wsserver = http.createServer(handleRequest);
 
 // Deepgram Speech to Text
 const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
@@ -27,7 +28,7 @@ let keepAlive;
 const OpenAI = require('openai');
 const openai = new OpenAI();
 
-// Deepgram Text to Speech Websocket URL via variable d'environnement (ou valeur par défaut)
+// Deepgram Text to Speech Websocket URL (utilise une variable d'environnement si nécessaire)
 const deepgramTTSWebsocketURL = process.env.DEEPGRAM_TTS_WS_URL || 'wss://api.deepgram.com/v1/speak?encoding=mulaw&sample_rate=8000&container=none';
 
 // Performance Timings
@@ -36,7 +37,7 @@ let ttsStart = 0;
 let firstByte = true;
 let speaking = false;
 let send_first_sentence_input_time = null;
-const chars_to_check = [".", ",", "!", "?", ";", ":"]
+const chars_to_check = [".", ",", "!", "?", ";", ":"];
 
 // Fonction pour gérer les requêtes HTTP
 function handleRequest(request, response) {
@@ -48,7 +49,7 @@ function handleRequest(request, response) {
 }
 
 /*
- Easy Debug Endpoint
+  Endpoint de debug
 */
 dispatcher.onGet("/", function (req, res) {
   console.log('GET /');
@@ -57,23 +58,32 @@ dispatcher.onGet("/", function (req, res) {
 });
 
 /*
- Twilio streams.xml
+  Endpoint pour le TwiML
+  Ici, nous lisons le fichier streams.xml, et nous remplaçons le placeholder
+  "<YOUR NGROK URL>" par la valeur de la variable SERVER (définie dans .env).
 */
 dispatcher.onPost("/twiml", function (req, res) {
-  let filePath = path.join(__dirname + "/templates", "streams.xml");
-  let stat = fs.statSync(filePath);
+  let filePath = path.join(__dirname, "templates", "streams.xml");
+  try {
+    let streamsXML = fs.readFileSync(filePath, "utf8");
+    // Remplacer le placeholder par la valeur de SERVER dans .env
+    const serverUrl = process.env.SERVER || "localhost";
+    streamsXML = streamsXML.replace("<YOUR NGROK URL>", serverUrl);
 
-  res.writeHead(200, {
-    "Content-Type": "text/xml",
-    "Content-Length": stat.size,
-  });
-
-  let readStream = fs.createReadStream(filePath);
-  readStream.pipe(res);
+    res.writeHead(200, {
+      "Content-Type": "text/xml",
+      "Content-Length": Buffer.byteLength(streamsXML)
+    });
+    res.end(streamsXML);
+  } catch (err) {
+    console.error("Erreur lors de la lecture du fichier streams.xml :", err);
+    res.writeHead(500, { "Content-Type": "text/plain" });
+    res.end("Internal Server Error");
+  }
 });
 
 /*
-  Websocket Server
+  Serveur WebSocket pour Twilio
 */
 const mediaws = new WebSocketServer({
   httpServer: wsserver,
@@ -86,7 +96,7 @@ mediaws.on("connect", function (connection) {
 });
 
 /*
-  Twilio Bi-directional Streaming
+  Classe pour gérer le flux média Twilio (bidirectionnel)
 */
 class MediaStream {
   constructor(connection) {
@@ -100,7 +110,6 @@ class MediaStream {
     this.repeatCount = 0;
   }
 
-  // Fonction pour traiter les messages entrants
   processMessage(message) {
     if (message.type === "utf8") {
       let data = JSON.parse(message.utf8Data);
@@ -137,15 +146,14 @@ class MediaStream {
     }
   }
 
-  // Fonction pour gérer la fermeture de la connexion
   close() {
     console.log("twilio: Closed");
   }
 }
 
-/*
-  OpenAI Streaming LLM
-*/
+// (Les fonctions promptLLM, containsAnyChars, setupDeepgramWebsocket et setupDeepgram
+// restent inchangées et sont définies ci-dessous, identiques à la version précédente)
+
 async function promptLLM(mediaStream, prompt) {
   const stream = openai.beta.chat.completions.stream({
     model: 'gpt-3.5-turbo',
@@ -177,14 +185,13 @@ async function promptLLM(mediaStream, prompt) {
       const chunk_message = chunk.choices[0].delta.content;
       if (chunk_message) {
         process.stdout.write(chunk_message);
-        if (!send_first_sentence_input_time && containsAnyChars(chunk_message)){
+        if (!send_first_sentence_input_time && containsAnyChars(chunk_message)) {
           send_first_sentence_input_time = Date.now();
         }
         mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ 'type': 'Speak', 'text': chunk_message }));
       }
     }
   }
-  // Indiquer à la websocket TTS que la génération est terminée
   mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ 'type': 'Flush' }));
 }
 
@@ -193,9 +200,6 @@ function containsAnyChars(str) {
   return strArray.some(char => chars_to_check.includes(char));
 }
 
-/*
-  Deepgram Streaming Text to Speech Websocket
-*/
 const setupDeepgramWebsocket = (mediaStream) => {
   const options = {
     headers: {
@@ -215,14 +219,14 @@ const setupDeepgramWebsocket = (mediaStream) => {
         console.log('deepgram TTS: ', data.toString());
         return;
       } catch (e) {
-        // Ignorer
+        // Ignorer les erreurs de parsing
       }
       if (firstByte) {
         const end = Date.now();
         const duration = end - ttsStart;
         console.warn('\n\n>>> deepgram TTS: Time to First Byte = ', duration, '\n');
         firstByte = false;
-        if (send_first_sentence_input_time){
+        if (send_first_sentence_input_time) {
           console.log(`>>> deepgram TTS: Time to First Byte from end of sentence token = `, (end - send_first_sentence_input_time));
         }
       }
@@ -248,11 +252,8 @@ const setupDeepgramWebsocket = (mediaStream) => {
     console.error(error);
   });
   return ws;
-}
+};
 
-/*
-  Deepgram Streaming Speech to Text
-*/
 const setupDeepgram = (mediaStream) => {
   let is_finals = [];
   const deepgram = deepgramClient.listen.live({
