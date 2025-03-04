@@ -1,3 +1,5 @@
+// server.js
+
 // Import required modules
 const fs = require("fs");
 const http = require("http");
@@ -9,15 +11,12 @@ dotenv.config();
 const HttpDispatcher = require("httpdispatcher");
 const WebSocketServer = require("websocket").server;
 const dispatcher = new HttpDispatcher();
-const wsserver = http.createServer(handleRequest); // Create HTTP server to handle requests
 
-const HTTP_SERVER_PORT = 8080; // Define the server port
-let streamSid = ''; // Variable to store stream session ID
+// Utilisation du port défini dans les variables d'environnement, ou 8080 par défaut
+const HTTP_SERVER_PORT = process.env.PORT || 8080;
+let streamSid = ''; // Variable pour stocker l'ID de la session de streaming
 
-const mediaws = new WebSocketServer({
-  httpServer: wsserver,
-  autoAcceptConnections: true,
-});
+const wsserver = http.createServer(handleRequest); // Crée un serveur HTTP pour gérer les requêtes
 
 // Deepgram Speech to Text
 const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
@@ -28,9 +27,8 @@ let keepAlive;
 const OpenAI = require('openai');
 const openai = new OpenAI();
 
-// Deepgram Text to Speech Websocket
-const WebSocket = require('ws');
-const deepgramTTSWebsocketURL = 'wss://api.deepgram.com/v1/speak?encoding=mulaw&sample_rate=8000&container=none';
+// Deepgram Text to Speech Websocket URL via variable d'environnement (ou valeur par défaut)
+const deepgramTTSWebsocketURL = process.env.DEEPGRAM_TTS_WS_URL || 'wss://api.deepgram.com/v1/speak?encoding=mulaw&sample_rate=8000&container=none';
 
 // Performance Timings
 let llmStart = 0;
@@ -40,7 +38,7 @@ let speaking = false;
 let send_first_sentence_input_time = null;
 const chars_to_check = [".", ",", "!", "?", ";", ":"]
 
-// Function to handle HTTP requests
+// Fonction pour gérer les requêtes HTTP
 function handleRequest(request, response) {
   try {
     dispatcher.dispatch(request, response);
@@ -77,6 +75,11 @@ dispatcher.onPost("/twiml", function (req, res) {
 /*
   Websocket Server
 */
+const mediaws = new WebSocketServer({
+  httpServer: wsserver,
+  autoAcceptConnections: true,
+});
+
 mediaws.on("connect", function (connection) {
   console.log("twilio: Connection accepted");
   new MediaStream(connection);
@@ -93,12 +96,11 @@ class MediaStream {
     connection.on("message", this.processMessage.bind(this));
     connection.on("close", this.close.bind(this));
     this.hasSeenMedia = false;
-
     this.messages = [];
     this.repeatCount = 0;
   }
 
-  // Function to process incoming messages
+  // Fonction pour traiter les messages entrants
   processMessage(message) {
     if (message.type === "utf8") {
       let data = JSON.parse(message.utf8Data);
@@ -135,7 +137,7 @@ class MediaStream {
     }
   }
 
-  // Function to handle connection close
+  // Fonction pour gérer la fermeture de la connexion
   close() {
     console.log("twilio: Closed");
   }
@@ -172,9 +174,9 @@ async function promptLLM(mediaStream, prompt) {
         firstToken = false;
         firstByte = true;
       }
-      chunk_message = chunk.choices[0].delta.content;
+      const chunk_message = chunk.choices[0].delta.content;
       if (chunk_message) {
-        process.stdout.write(chunk_message)
+        process.stdout.write(chunk_message);
         if (!send_first_sentence_input_time && containsAnyChars(chunk_message)){
           send_first_sentence_input_time = Date.now();
         }
@@ -182,20 +184,17 @@ async function promptLLM(mediaStream, prompt) {
       }
     }
   }
-  // Tell TTS Websocket were finished generation of tokens
+  // Indiquer à la websocket TTS que la génération est terminée
   mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ 'type': 'Flush' }));
 }
 
 function containsAnyChars(str) {
-  // Convert the string to an array of characters
   let strArray = Array.from(str);
-  
-  // Check if any character in strArray exists in chars_to_check
   return strArray.some(char => chars_to_check.includes(char));
 }
 
 /*
-  Deepgram Streaming Text to Speech
+  Deepgram Streaming Text to Speech Websocket
 */
 const setupDeepgramWebsocket = (mediaStream) => {
   const options = {
@@ -210,14 +209,13 @@ const setupDeepgramWebsocket = (mediaStream) => {
   });
 
   ws.on('message', function incoming(data) {
-    // Handles barge in
     if (speaking) {
       try {
         let json = JSON.parse(data.toString());
         console.log('deepgram TTS: ', data.toString());
         return;
       } catch (e) {
-        // Ignore
+        // Ignorer
       }
       if (firstByte) {
         const end = Date.now();
@@ -237,8 +235,6 @@ const setupDeepgramWebsocket = (mediaStream) => {
         },
       };
       const messageJSON = JSON.stringify(message);
-
-      // console.log('\ndeepgram TTS: Sending data.length:', data.length);
       mediaStream.connection.sendUTF(messageJSON);
     }
   });
@@ -260,17 +256,13 @@ const setupDeepgramWebsocket = (mediaStream) => {
 const setupDeepgram = (mediaStream) => {
   let is_finals = [];
   const deepgram = deepgramClient.listen.live({
-    // Model
     model: "nova-2-phonecall",
     language: "en",
-    // Formatting
     smart_format: true,
-    // Audio
     encoding: "mulaw",
     sample_rate: 8000,
     channels: 1,
     multichannel: false,
-    // End of Speech
     no_delay: true,
     interim_results: true,
     endpointing: 300,
@@ -279,7 +271,7 @@ const setupDeepgram = (mediaStream) => {
 
   if (keepAlive) clearInterval(keepAlive);
   keepAlive = setInterval(() => {
-    deepgram.keepAlive(); // Keeps the connection alive
+    deepgram.keepAlive();
   }, 10 * 1000);
 
   deepgram.addListener(LiveTranscriptionEvents.Open, async () => {
@@ -295,7 +287,7 @@ const setupDeepgram = (mediaStream) => {
             is_finals = [];
             console.log(`deepgram STT: [Speech Final] ${utterance}`);
             llmStart = Date.now();
-            promptLLM(mediaStream, utterance); // Send the final transcript to OpenAI for response
+            promptLLM(mediaStream, utterance);
           } else {
             console.log(`deepgram STT:  [Is Final] ${transcript}`);
           }
@@ -303,7 +295,6 @@ const setupDeepgram = (mediaStream) => {
           console.log(`deepgram STT:    [Interim Result] ${transcript}`);
           if (speaking) {
             console.log('twilio: clear audio playback', streamSid);
-            // Handles Barge In
             const messageJSON = JSON.stringify({
               "event": "clear",
               "streamSid": streamSid,
