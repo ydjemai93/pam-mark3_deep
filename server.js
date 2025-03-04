@@ -9,14 +9,14 @@ dotenv.config();
 
 // Twilio
 const HttpDispatcher = require("httpdispatcher");
-const WebSocketServer = require("websocket").server;
+const { server: WebSocketServer } = require("websocket");
 const dispatcher = new HttpDispatcher();
 
 // Utilisation du port défini dans process.env.PORT (Railway fournit cette variable) ou 8080 par défaut
 const HTTP_SERVER_PORT = process.env.PORT || 8080;
 let streamSid = ''; // Pour stocker l'ID de la session de streaming
 
-// Crée le serveur HTTP pour gérer les requêtes
+// Créer le serveur HTTP pour gérer les requêtes
 const wsserver = http.createServer(handleRequest);
 
 // Deepgram Speech to Text
@@ -86,15 +86,22 @@ dispatcher.onPost("/twiml", function (req, res) {
 
 /*
   Serveur WebSocket pour Twilio
+  Ici, nous utilisons l'événement "request" pour accepter uniquement les connexions sur "/streams"
 */
 const mediaws = new WebSocketServer({
   httpServer: wsserver,
-  autoAcceptConnections: true,
+  autoAcceptConnections: false,
 });
 
-mediaws.on("connect", function (connection) {
-  console.log("twilio: Connection accepted");
-  new MediaStream(connection);
+mediaws.on("request", function (request) {
+  if (request.resourceURL.pathname === "/streams") {
+    let connection = request.accept();
+    console.log("twilio: Connection accepted on /streams");
+    new MediaStream(connection);
+  } else {
+    request.reject();
+    console.log("twilio: Connection rejected, invalid URL:", request.resourceURL.pathname);
+  }
 });
 
 /*
@@ -194,7 +201,6 @@ async function promptLLM(mediaStream, prompt) {
       }
     }
   }
-  // Indiquer à la websocket TTS que la génération est terminée
   mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ 'type': 'Flush' }));
 }
 
