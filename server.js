@@ -7,6 +7,9 @@ const path = require("path");
 const dotenv = require("dotenv");
 dotenv.config();
 
+// Importation du module ws pour créer des WebSocket
+const WebSocket = require("ws");
+
 // Twilio
 const HttpDispatcher = require("httpdispatcher");
 const { server: WebSocketServer } = require("websocket");
@@ -86,7 +89,7 @@ dispatcher.onPost("/twiml", function (req, res) {
 
 /*
   Serveur WebSocket pour Twilio
-  Ici, nous utilisons l'événement "request" pour accepter uniquement les connexions sur "/streams"
+  Accepter uniquement les connexions sur le chemin "/streams"
 */
 const mediaws = new WebSocketServer({
   httpServer: wsserver,
