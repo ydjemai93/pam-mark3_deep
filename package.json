@@ -19,5 +19,6 @@
     "node-fetch": "^2.7.0",
     "openai": "^4.52.7",
     "websocket": "^1.0.28"
+    "twilio": "^4.15.2"
   }
 }
