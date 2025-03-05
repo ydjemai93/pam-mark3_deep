@@ -4,13 +4,13 @@ require("dotenv").config();
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const url = require("url"); // Pour un routage minimal
+const url = require("url");
 const { server: WebSocketServer } = require("websocket");
 const WebSocket = require("ws");
 
-// --------------------------------------
-// 1) Twilio
-// --------------------------------------
+// ----------------------------------
+// 1) Twilio (REST) - pour /outbound
+// ----------------------------------
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
 let twilioClient = null;
@@ -19,77 +19,60 @@ if (accountSid && authToken) {
   twilioClient = twilio(accountSid, authToken);
   console.log("Twilio client initialisé avec SID =", accountSid);
 } else {
-  console.warn("ATTENTION: TWILIO_ACCOUNT_SID ou TWILIO_AUTH_TOKEN manquants. L'appel sortant échouera.");
+  console.warn("TWILIO_ACCOUNT_SID ou TWILIO_AUTH_TOKEN manquants. L'appel sortant échouera.");
 }
 
-// --------------------------------------
+// ----------------------------------
 // 2) Deepgram (STT & TTS)
-// --------------------------------------
+// ----------------------------------
 const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 const deepgramClient = createClient(process.env.DEEPGRAM_API_KEY);
-
 const deepgramTTSWebsocketURL =
   process.env.DEEPGRAM_TTS_WS_URL ||
   "wss://api.deepgram.com/v1/speak?encoding=mulaw&sample_rate=8000&container=none";
 
-// --------------------------------------
+// ----------------------------------
 // 3) OpenAI
-// --------------------------------------
+// ----------------------------------
 const OpenAI = require("openai");
 const openai = new OpenAI();
 
-// CECI est notre message system qui entraîne GPT à être «Pam»
+// =====================================
+// Ajout d'un "systemMessage" + message assistant initial
+// =====================================
+
+// -- Le message système (instructions pour GPT, non prononcé) :
 const systemMessage = `
-You are Pam, an AI phone agent designed to present a demo to users who have filled out a form on our website. You are capable of handling secretarial requests, customer support, sales, and technical support. You can utilize various tools to personalize and integrate into professional contexts.
-Start with a friendly greeting, acknowledge the form submission, and maintain a conversational tone throughout. Your goal is to ensure users feel they are engaging with a human-like assistant.
-# Instructions
-- Begin with a polite greeting and acknowledge the form submission.
-- Present a demo showcasing your capabilities in handling:
-  - Secretarial Requests
-  - Customer Support
-  - Sales
-  - Technical Support
+You are Pam, an AI phone agent designed to present a demo to users who have filled out a form on our website. 
+You are capable of handling secretarial requests, customer support, sales, and technical support. 
+You can utilize various tools to personalize and integrate into professional contexts. 
+Your goal is to sound natural and human-like, while following these steps:
 
-- Highlight your ability to personalize interactions with users and adapt to professional contexts.
-- Be respectful and adaptive in your responses, ensuring clarity and professionalism.
+1. Greet politely and acknowledge the form submission.
+2. Demonstrate capabilities (secretarial, customer support, sales, technical).
+3. Provide examples or scenarios to show how you can help.
+4. Summarize and ask if the user has any questions or requests.
 
-# Steps
-1. Greeting: Start with a polite greeting and mention the form the user submitted.
-2. Demo Presentation: Outline your capabilities, focusing on specific areas relevant to the user's interests or needs.
-3. Example Scenarios
-4. Integration and Personalization
-5. Summary and Next Steps
-
-# Output Format
-- Demo Presentation: Provide a structured overview of each capability, highlighting key features and benefits.
-- Conversational Responses: Answer any user questions or requests in a clear, professional tone.
-
-# Examples
-Example 1: Secretarial Request
-User: "Can you help manage my appointments?"
-Output: "Certainly! I can organize and track your appointments..."
-
-Example 2: Customer Support
-User: "I have an issue with my order."
-Output: "I’m here to help. Please provide your order number..."
-
-Example 3: Sales Inquiry
-User: "What products do you offer?"
-Output: "We offer a wide range..."
-
-# Notes
-- Ensure confidentiality
-- Adapt to scenario
+Keep the conversation friendly and professional. Adapt to the user's input and avoid merely reciting these instructions out loud.
 `;
 
-// --------------------------------------
-// 4) Variables globales
-// --------------------------------------
+// -- Le message assistant initial qui sera lu par TTS dès qu'on démarre la conversation
+// (ex. quand Twilio envoie "start" event).
+const initialAssistantMessage = `Hello! This is Pam, your AI phone agent. Thank you for submitting the form on our website. 
+I'm here to give you a quick demo of my capabilities, including secretarial tasks, customer support, sales assistance, and technical help. 
+How can I assist you today?`;
+
+// ----------------------------------
+// Variables globales (pour démo single-call)
+// ----------------------------------
 const PORT = process.env.PORT || 8080;
 let streamSid = "";
 let keepAlive;
 
-// Performance / timings
+// Ce tableau va stocker l'historique des messages { role: 'user' | 'assistant', content: string }
+let conversation = [];
+
+// Contrôle TTS
 let speaking = false;
 let firstByte = true;
 let llmStart = 0;
@@ -97,14 +80,14 @@ let ttsStart = 0;
 let send_first_sentence_input_time = null;
 const chars_to_check = [".", ",", "!", "?", ";", ":"];
 
-// --------------------------------------
-// 5) Création du serveur HTTP
-// --------------------------------------
+// ----------------------------------
+// 4) Serveur HTTP (pour /twiml, /outbound, etc.)
+// ----------------------------------
 const server = http.createServer(async (req, res) => {
   const parsedUrl = url.parse(req.url, true);
   const pathname = parsedUrl.pathname;
 
-  // GET / => test
+  // GET / => test simple
   if (req.method === "GET" && pathname === "/") {
     console.log("GET /");
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -118,7 +101,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ message: "pong" }));
   }
 
-  // POST /twiml => renvoie le fichier streams.xml (TwiML)
+  // POST /twiml => renvoie le TwiML (streams.xml) utilisé par Twilio
   if (req.method === "POST" && pathname === "/twiml") {
     console.log("POST /twiml");
     try {
@@ -126,9 +109,7 @@ const server = http.createServer(async (req, res) => {
       let streamsXML = fs.readFileSync(filePath, "utf8");
 
       let serverUrl = process.env.SERVER || "localhost";
-      // Retire http(s):// s'il y en a
-      serverUrl = serverUrl.replace(/^https?:\/\//, "");
-      // Remplace <YOUR NGROK URL> par serverUrl
+      serverUrl = serverUrl.replace(/^https?:\/\//, ""); // retirer http(s)://
       streamsXML = streamsXML.replace("<YOUR NGROK URL>", serverUrl);
 
       res.writeHead(200, { "Content-Type": "text/xml" });
@@ -140,12 +121,11 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // POST /outbound => initie un appel sortant
+  // POST /outbound => initier un appel sortant via Twilio
   if (req.method === "POST" && pathname === "/outbound") {
     console.log("POST /outbound -- route démarrée");
     let body = "";
 
-    // Lecture du body
     req.on("data", (chunk) => {
       console.log("  /outbound: chunk =", chunk.toString());
       body += chunk;
@@ -169,21 +149,19 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ success: false, error: "Missing 'to' parameter" }));
       }
-
       if (!twilioClient) {
         console.error("  /outbound: Twilio client non initialisé.");
         res.writeHead(500, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ success: false, error: "Twilio not configured" }));
       }
 
-      // Définir l'URL TwiML
+      // URL TwiML
       let domain = process.env.SERVER || "";
       if (!domain.startsWith("http")) domain = "https://" + domain;
       domain = domain.replace(/\/$/, "");
       const twimlUrl = `${domain}/twiml`;
 
       try {
-        // fromNumber = numéro Twilio que vous avez
         const fromNumber = process.env.TWILIO_PHONE_NUMBER || "+15017122661";
         console.log("  /outbound: calls.create => to:", toNumber, "from:", fromNumber, "url:", twimlUrl);
 
@@ -219,9 +197,9 @@ const server = http.createServer(async (req, res) => {
   res.end("Not Found");
 });
 
-// --------------------------------------
-// 6) Mise en place du WebSocketServer pour /streams
-// --------------------------------------
+// ----------------------------------
+// 5) WebSocketServer => /streams
+// ----------------------------------
 const wsServer = new WebSocketServer({
   httpServer: server,
   autoAcceptConnections: false,
@@ -238,17 +216,29 @@ wsServer.on("request", function (request) {
   }
 });
 
-// --------------------------------------
-// 7) Classe MediaStream
-// --------------------------------------
+// ----------------------------------
+// 6) Classe MediaStream
+// ----------------------------------
 class MediaStream {
   constructor(connection) {
     this.connection = connection;
     this.hasSeenMedia = false;
 
-    // Instancier STT & TTS
+    // Réinitialiser la conversation à chaque nouvel appel:
+    conversation = [];
+
+    // 1) On ajoute un message assistant initial, qu'on va prononcer tout de suite
+    conversation.push({
+      role: "assistant",
+      content: initialAssistantMessage,
+    });
+
+    // 2) STT & TTS
     this.deepgram = setupDeepgram(this);
     this.deepgramTTSWebsocket = setupDeepgramTTS(this);
+
+    // 3) Envoyer la première phrase
+    this.speak(initialAssistantMessage);
 
     connection.on("message", this.processMessage.bind(this));
     connection.on("close", this.close.bind(this));
@@ -282,9 +272,25 @@ class MediaStream {
           this.close();
           break;
         default:
-          console.log("twilio: other event =>", data.event);
+          // mark, etc.
+          // console.log("twilio: other event =>", data);
+          break;
       }
     }
+  }
+
+  speak(text) {
+    // Envoyer le texte au TTS WebSocket
+    // Indique qu'on est en train de parler
+    speaking = true;
+    firstByte = true;
+    ttsStart = Date.now();
+    send_first_sentence_input_time = null;
+
+    // On envoie le chunk "text" (en 1 bloc) => Deepgram TTS
+    this.deepgramTTSWebsocket.send(JSON.stringify({ type: "Speak", text }));
+    // Puis "Flush"
+    this.deepgramTTSWebsocket.send(JSON.stringify({ type: "Flush" }));
   }
 
   close() {
@@ -292,9 +298,9 @@ class MediaStream {
   }
 }
 
-// --------------------------------------
-// 8) Deepgram STT
-// --------------------------------------
+// ----------------------------------
+// 7) Deepgram STT
+// ----------------------------------
 function setupDeepgram(mediaStream) {
   let is_finals = [];
   const dgLive = deepgramClient.listen.live({
@@ -304,7 +310,6 @@ function setupDeepgram(mediaStream) {
     encoding: "mulaw",
     sample_rate: 8000,
     channels: 1,
-    multichannel: false,
     no_delay: true,
     interim_results: true,
     endpointing: 300,
@@ -329,14 +334,20 @@ function setupDeepgram(mediaStream) {
           const utterance = is_finals.join(" ");
           is_finals = [];
           console.log("deepgram STT: speech final =>", utterance);
-          llmStart = Date.now();
-          promptLLM(mediaStream, utterance); // On appelle GPT
+          // L'utilisateur a parlé => on arrête de parler
+          speaking = false;
+
+          // Ajouter ce message user à la conversation
+          conversation.push({ role: "user", content: utterance });
+
+          // Appeler GPT
+          callGPT(mediaStream);
         } else {
           console.log("deepgram STT: final =>", transcript);
         }
       } else {
         console.log("deepgram STT: interim =>", transcript);
-        // Couper le TTS si l'agent parlait
+        // Couper la parole si l'agent parlait
         if (speaking) {
           console.log("interrupt TTS => user speaking");
           mediaStream.connection.sendUTF(JSON.stringify({ event: "clear", streamSid }));
@@ -347,12 +358,14 @@ function setupDeepgram(mediaStream) {
     });
 
     dgLive.addListener(LiveTranscriptionEvents.UtteranceEnd, () => {
+      // Au cas où
       if (is_finals.length) {
         const utterance = is_finals.join(" ");
         is_finals = [];
         console.log("deepgram STT: utteranceEnd =>", utterance);
-        llmStart = Date.now();
-        promptLLM(mediaStream, utterance);
+        speaking = false;
+        conversation.push({ role: "user", content: utterance });
+        callGPT(mediaStream);
       }
     });
 
@@ -374,9 +387,9 @@ function setupDeepgram(mediaStream) {
   return dgLive;
 }
 
-// --------------------------------------
-// 9) Deepgram TTS
-// --------------------------------------
+// ----------------------------------
+// 8) Deepgram TTS
+// ----------------------------------
 function setupDeepgramTTS(mediaStream) {
   const ws = new WebSocket(deepgramTTSWebsocketURL, {
     headers: {
@@ -395,7 +408,7 @@ function setupDeepgramTTS(mediaStream) {
       console.log("deepgram TTS => JSON msg:", maybeJson);
       return;
     } catch (err) {
-      // c'est probablement de l'audio binaire
+      // c'est probablement de l'audio
     }
 
     if (firstByte) {
@@ -403,18 +416,14 @@ function setupDeepgramTTS(mediaStream) {
       console.log("deepgram TTS: time to first byte =", diff, "ms");
       firstByte = false;
       if (send_first_sentence_input_time) {
-        console.log(
-          "deepgram TTS: TTFB from end of sentence token =",
-          Date.now() - send_first_sentence_input_time,
-          "ms"
-        );
+        console.log("deepgram TTS: TTFB from end of sentence token =", Date.now() - send_first_sentence_input_time, "ms");
       }
     }
 
     const payload = data.toString("base64");
     const msg = {
       event: "media",
-      streamSid: streamSid,
+      streamSid,
       media: { payload },
     };
     mediaStream.connection.sendUTF(JSON.stringify(msg));
@@ -431,55 +440,69 @@ function setupDeepgramTTS(mediaStream) {
   return ws;
 }
 
-// --------------------------------------
-// 10) GPT - promptLLM (Streaming)
-// --------------------------------------
-async function promptLLM(mediaStream, userPrompt) {
+// ----------------------------------
+// 9) Appel GPT (multi-tours) => promptLLM
+// ----------------------------------
+async function callGPT(mediaStream) {
+  // On va préparer un "assistant" en streaming
+  console.log("\ncallGPT: conversation =", conversation);
+
+  // On redémarre speaking
   speaking = true;
   let firstToken = true;
+  llmStart = Date.now();
 
   const stream = openai.beta.chat.completions.stream({
-    model: "gpt-4o",
+    model: "gpt-3.5-turbo",
     stream: true,
     messages: [
-      // ICI on insère le message "system"
       { role: "system", content: systemMessage },
-      // L'utilisateur, c'est la transcription reconnue par Deepgram
-      { role: "user", content: userPrompt },
+      // On empile tout l'historique (assistant + user)
+      ...conversation,
     ],
   });
 
+  // On va accumuler la réponse en string pour la stocker dans conversation
+  let assistantReply = "";
+
   for await (const chunk of stream) {
-    if (!speaking) break;
+    if (!speaking) break; // En cas d'interruption
+
     if (firstToken) {
       const timeToFirstToken = Date.now() - llmStart;
-      ttsStart = Date.now();
       console.log("openai LLM: time to first token =", timeToFirstToken, "ms");
       firstToken = false;
       firstByte = true;
+      ttsStart = Date.now();
     }
     const chunkMessage = chunk.choices[0].delta.content;
     if (chunkMessage) {
-      process.stdout.write(chunkMessage);
-      if (!send_first_sentence_input_time && hasEndingPunctuation(chunkMessage)) {
+      assistantReply += chunkMessage;
+      if (!send_first_sentence_input_time && containsAnyChars(chunkMessage)) {
         send_first_sentence_input_time = Date.now();
       }
-      mediaStream.deepgramTTSWebsocket.send(
-        JSON.stringify({ type: "Speak", text: chunkMessage })
-      );
+      // On envoie au TTS en temps réel
+      mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: "Speak", text: chunkMessage }));
     }
   }
+
+  // Flush final
   mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: "Flush" }));
+
+  // Ajouter dans la conversation
+  if (assistantReply.trim()) {
+    conversation.push({ role: "assistant", content: assistantReply });
+  }
 }
 
-function hasEndingPunctuation(str) {
-  // Vérifie si la chaîne contient l'une des ponctuations
+// Petit util pour détecter ponctuation
+function containsAnyChars(str) {
   return [...str].some((char) => chars_to_check.includes(char));
 }
 
-// --------------------------------------
-// 11) Lancement du serveur
-// --------------------------------------
+// ----------------------------------
+// 10) Lancement du serveur
+// ----------------------------------
 server.listen(PORT, () => {
   console.log("Serveur démarré sur le port", PORT);
   console.log("Test endpoints:");
