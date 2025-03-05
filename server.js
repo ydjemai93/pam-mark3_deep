@@ -61,13 +61,17 @@ function handleRequest(request, response) {
 function parseJSONBody(req) {
   return new Promise((resolve) => {
     let body = "";
-    req.on("data", (chunk) => { body += chunk; });
+    req.on("data", (chunk) => {
+      console.log("parseJSONBody: received chunk:", chunk);
+      body += chunk; });
     req.on("end", () => {
-      console.log("Body received:", body); // <-- Ajoutez ceci
+      console.log("parseJSONBody: end event. Body =", body);
       try {
         const data = JSON.parse(body);
+        console.log("parseJSONBody: JSON parsed =", data);
         resolve(data);
       } catch (error) {
+        console.error("parseJSONBody: JSON parse error:", error);
         resolve(null);
       }
     });
