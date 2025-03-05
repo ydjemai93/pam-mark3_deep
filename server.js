@@ -1,52 +1,62 @@
 // server.js
 
-// 1) Modules de base
+// Import required modules
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const dotenv = require("dotenv");
+dotenv.config();
 
-// 2) Chargement des variables d'environnement
-require("dotenv").config();
-
-// 3) WebSocket
+// Importation du module ws pour créer des WebSocket
 const WebSocket = require("ws");
 
-// 4) Twilio
-const twilio = require("twilio");
-const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-
-// 5) HttpDispatcher pour router les requêtes
+// Twilio et HttpDispatcher
 const HttpDispatcher = require("httpdispatcher");
+const { server: WebSocketServer } = require("websocket");
 const dispatcher = new HttpDispatcher();
 
-// 6) WebSocketServer (pour Twilio Media Streams)
-const { server: WebSocketServer } = require("websocket");
+// Utilisation du port défini dans process.env.PORT (Railway fournit cette variable) ou 8080 par défaut
+const HTTP_SERVER_PORT = process.env.PORT || 8080;
+let streamSid = ''; // Pour stocker l'ID de la session de streaming
 
-// 7) Deepgram (STT)
+// Twilio REST API client (assurez-vous d'installer la librairie Twilio)
+const accountSid = process.env.TWILIO_ACCOUNT_SID;
+const authToken = process.env.TWILIO_AUTH_TOKEN;
+const twilioNumber = process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_NUMBER;
+let twilioClient;
+if (accountSid && authToken) {
+  // Charger la librairie Twilio et initialiser le client REST
+  const twilio = require("twilio");
+  twilioClient = twilio(accountSid, authToken);
+  console.log("Twilio client initialisé pour les appels sortants.");
+} else {
+  console.warn("Twilio credentials manquants. L'endpoint /outbound ne fonctionnera pas.");
+}
+
+// Créer le serveur HTTP pour gérer les requêtes
+const wsserver = http.createServer(handleRequest);
+
+// Deepgram Speech to Text
 const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 const deepgramClient = createClient(process.env.DEEPGRAM_API_KEY);
+let keepAlive;
 
-// 8) OpenAI
-const OpenAI = require("openai");
+// OpenAI
+const OpenAI = require('openai');
 const openai = new OpenAI();
 
-// 9) Configuration
-const HTTP_SERVER_PORT = process.env.PORT || 8080;
-let streamSid = ""; // Pour stocker l'ID de la session de streaming
-let keepAlive;
-let speaking = false;
-let firstByte = true;
+// Deepgram Text to Speech Websocket URL (possibilité de le définir via DEEPGRAM_TTS_WS_URL)
+const deepgramTTSWebsocketURL = process.env.DEEPGRAM_TTS_WS_URL || 'wss://api.deepgram.com/v1/speak?encoding=mulaw&sample_rate=8000&container=none';
+
+// Performance Timings et autres variables
 let llmStart = 0;
 let ttsStart = 0;
+let firstByte = true;
+let speaking = false;
 let send_first_sentence_input_time = null;
 const chars_to_check = [".", ",", "!", "?", ";", ":"];
 
-// 10) Création du serveur HTTP
-const wsserver = http.createServer(handleRequest);
-
-// ---------------------------------------------------------------------
-// GESTIONNAIRE DE REQUÊTES
-// ---------------------------------------------------------------------
+// Fonction pour gérer les requêtes HTTP
 function handleRequest(request, response) {
   try {
     dispatcher.dispatch(request, response);
@@ -55,57 +65,34 @@ function handleRequest(request, response) {
   }
 }
 
-//
-// Petit helper pour parser le body en JSON (puisque httpdispatcher ne le fait pas d'office)
-//
-function parseJSONBody(req) {
-  return new Promise((resolve) => {
-    let body = "";
-    req.on("data", (chunk) => {
-      console.log("parseJSONBody: received chunk:", chunk);
-      body += chunk; });
-    req.on("end", () => {
-      console.log("parseJSONBody: end event. Body =", body);
-      try {
-        const data = JSON.parse(body);
-        console.log("parseJSONBody: JSON parsed =", data);
-        resolve(data);
-      } catch (error) {
-        console.error("parseJSONBody: JSON parse error:", error);
-        resolve(null);
-      }
-    });
-  });
-}
-
-// ---------------------------------------------------------------------
-// ENDPOINT / (debug)
-// ---------------------------------------------------------------------
+/*
+  Endpoint de debug
+*/
 dispatcher.onGet("/", function (req, res) {
-  console.log("GET /");
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Hello, World! Twilio + Deepgram + GPT Agent is running.");
+  console.log('GET /');
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Hello, World!');
 });
 
-// ---------------------------------------------------------------------
-// ENDPOINT /twiml
-// Retourne le XML (streams.xml) avec la balise <Connect><Stream>...
-// ---------------------------------------------------------------------
+/*
+  Endpoint pour le TwiML
+  Lecture du fichier streams.xml, remplacement du placeholder <YOUR NGROK URL>
+  par la variable SERVER (sans protocole) définie dans le fichier .env.
+*/
 dispatcher.onPost("/twiml", function (req, res) {
-  const filePath = path.join(__dirname, "templates", "streams.xml");
+  console.log("POST /twiml");
+  let filePath = path.join(__dirname, "templates", "streams.xml");
   try {
     let streamsXML = fs.readFileSync(filePath, "utf8");
     // Récupérer le domaine du serveur depuis process.env.SERVER
     let serverUrl = process.env.SERVER || "localhost";
-    // Enlever http:// ou https:// s'ils sont présents
-    serverUrl = serverUrl.replace(/^https?:\/\//, "");
-
-    // Remplacer la chaîne <YOUR NGROK URL> par serverUrl
+    // Retirer "http://" ou "https://" s'ils sont présents
+    serverUrl = serverUrl.replace(/^https?:\/\//, '');
+    // Remplacer le placeholder dans le fichier streams.xml par le domaine du serveur
     streamsXML = streamsXML.replace("<YOUR NGROK URL>", serverUrl);
-
     res.writeHead(200, {
       "Content-Type": "text/xml",
-      "Content-Length": Buffer.byteLength(streamsXML),
+      "Content-Length": Buffer.byteLength(streamsXML)
     });
     res.end(streamsXML);
   } catch (err) {
@@ -115,51 +102,84 @@ dispatcher.onPost("/twiml", function (req, res) {
   }
 });
 
-// ---------------------------------------------------------------------
-// NOUVEL ENDPOINT /outbound
-// Pour lancer un appel sortant depuis votre agent IA vers un numéro utilisateur
-// ---------------------------------------------------------------------
-dispatcher.onPost("/outbound", async function (req, res) {
-   console.log(">>>> Received POST /outbound"); // <- Pour vérifier
-  try {
-    // On parse le body JSON
-    const data = await parseJSONBody(req);
-    if (!data || !data.to) {
+/*
+  Endpoint pour les appels sortants (outbound)
+  Reçoit une requête POST avec le numéro à appeler et initie un appel via Twilio.
+  Twilio utilisera ensuite l'endpoint /twiml pour les instructions de l'appel.
+*/
+dispatcher.onPost("/outbound", function (req, res) {
+  console.log("POST /outbound");
+  // Accumuler le corps de la requête
+  let body = "";
+  req.on("data", chunk => {
+    body += chunk;
+  });
+  req.on("end", async () => {
+    let data;
+    try {
+      data = JSON.parse(body);
+    } catch (err) {
+      console.error("Erreur de parsing du corps de la requête /outbound:", err);
       res.writeHead(400, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ error: 'Missing "to" in JSON body' }));
+      res.end(JSON.stringify({ success: false, error: "Invalid JSON" }));
+      return;
     }
-
-    const toNumber = data.to;
-    // Lancer l'appel via Twilio
-    const call = await twilioClient.calls.create({
-      from: process.env.TWILIO_FROM_NUMBER, // Numéro Twilio
-      to: toNumber,                         // Numéro cible (depuis Webflow/Xano)
-      // Quand la personne décroche, Twilio appelle /twiml pour streamer
-      url: `https://${process.env.SERVER}/twiml`,
-    });
-
-    console.log("Twilio call initiated, SID =", call.sid);
-
-    // Répondre à Xano / au client
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", callSid: call.sid }));
-  } catch (err) {
-    console.error("Error while placing call:", err);
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: err.message }));
-  }
+    console.log("Corps de la requête /outbound:", data);
+    // Extraire les paramètres (numéros de téléphone)
+    const toNumber = data.to || data.number;
+    const fromNumber = twilioNumber || data.from;
+    // Vérifier les prérequis
+    if (!twilioClient) {
+      console.error("Twilio client non initialisé. Vérifiez les identifiants Twilio.");
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: "Twilio client not initialized" }));
+      return;
+    }
+    if (!toNumber || !fromNumber) {
+      console.error("Numéro de destination ou numéro source manquant. to:", toNumber, "from:", fromNumber);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: "Missing 'to' or 'from' number" }));
+      return;
+    }
+    console.log(`Initiation de l'appel vers ${toNumber} depuis ${fromNumber} via Twilio...`);
+    try {
+      // Construire l'URL du TwiML qui sera appelé une fois l'appel connecté
+      let twimlUrl = process.env.SERVER || "";
+      if (twimlUrl) {
+        // S'assurer que l'URL contient le protocole
+        if (!twimlUrl.startsWith("http")) {
+          twimlUrl = "https://" + twimlUrl;
+        }
+        // Chemin complet vers l'endpoint /twiml
+        twimlUrl = twimlUrl.replace(/\/$/, "") + "/twiml";
+      } else {
+        // Si aucune URL de serveur n'est fournie, utiliser l'URL locale
+        twimlUrl = `http://localhost:${HTTP_SERVER_PORT}/twiml`;
+      }
+      console.log("TwiML URL utilisé pour l'appel:", twimlUrl);
+      // Initier l'appel sortant via l'API Twilio
+      const call = await twilioClient.calls.create({
+        to: toNumber,
+        from: fromNumber,
+        url: twimlUrl,
+        method: "POST"  // Twilio fera une requête POST sur /twiml
+      });
+      console.log("Appel sortant initié via Twilio. Call SID:", call.sid);
+      // Répondre avec succès et le SID de l'appel pour confirmer
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, callSid: call.sid }));
+    } catch (err) {
+      console.error("Erreur lors de l'initiation de l'appel Twilio:", err);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+  });
 });
 
-// ---------------------------------------------------------------------
-// Lancement du serveur HTTP
-// ---------------------------------------------------------------------
-wsserver.listen(HTTP_SERVER_PORT, function () {
-  console.log("Server listening on port:", HTTP_SERVER_PORT);
-});
-
-// ---------------------------------------------------------------------
-// WEBSOCKET (pour Twilio /streams)
-// ---------------------------------------------------------------------
+/*
+  Serveur WebSocket pour Twilio
+  Accepter uniquement les connexions sur le chemin "/streams"
+*/
 const mediaws = new WebSocketServer({
   httpServer: wsserver,
   autoAcceptConnections: false,
@@ -176,181 +196,171 @@ mediaws.on("request", function (request) {
   }
 });
 
-// ---------------------------------------------------------------------
-// Classe MediaStream : gère le flux media bidirectionnel
-// ---------------------------------------------------------------------
+/*
+  Classe pour gérer le flux média (Twilio bidirectionnel)
+*/
 class MediaStream {
   constructor(connection) {
     this.connection = connection;
+    this.deepgram = setupDeepgram(this);
+    this.deepgramTTSWebsocket = setupDeepgramWebsocket(this);
+    connection.on("message", this.processMessage.bind(this));
+    connection.on("close", this.close.bind(this));
     this.hasSeenMedia = false;
     this.messages = [];
     this.repeatCount = 0;
-
-    // Init STT & TTS
-    this.deepgram = setupDeepgram(this);
-    this.deepgramTTSWebsocket = setupDeepgramTTS(this);
-
-    // Events Twilio
-    connection.on("message", this.processMessage.bind(this));
-    connection.on("close", this.close.bind(this));
   }
 
   processMessage(message) {
     if (message.type === "utf8") {
-      const data = JSON.parse(message.utf8Data);
-      switch (data.event) {
-        case "connected":
-          console.log("twilio: Connected event received:", data);
-          break;
-
-        case "start":
-          console.log("twilio: Start event received:", data);
-          break;
-
-        case "media":
-          if (!this.hasSeenMedia) {
-            console.log("twilio: First Media event received:", data);
-            console.log("twilio: (Suppressing additional media logs...)");
-            this.hasSeenMedia = true;
-          }
-          if (!streamSid) {
-            streamSid = data.streamSid;
-          }
-          if (data.media.track === "inbound") {
-            const rawAudio = Buffer.from(data.media.payload, "base64");
-            this.deepgram.send(rawAudio);
-          }
-          break;
-
-        case "close":
-          console.log("twilio: Close event received:", data);
-          this.close();
-          break;
-
-        default:
-          // ex: mark events, etc.
-          break;
+      let data = JSON.parse(message.utf8Data);
+      if (data.event === "connected") {
+        console.log("twilio: Connected event received:", data);
       }
-    } else {
-      console.log("twilio: binary message received (ignored).");
+      if (data.event === "start") {
+        console.log("twilio: Start event received:", data);
+      }
+      if (data.event === "media") {
+        if (!this.hasSeenMedia) {
+          console.log("twilio: Media event received:", data);
+          console.log("twilio: Suppressing additional messages...");
+          this.hasSeenMedia = true;
+        }
+        if (!streamSid) {
+          console.log('twilio: streamSid =', streamSid);
+          streamSid = data.streamSid;
+        }
+        if (data.media.track === "inbound") {
+          let rawAudio = Buffer.from(data.media.payload, 'base64');
+          this.deepgram.send(rawAudio);
+        }
+      }
+      if (data.event === "mark") {
+        console.log("twilio: Mark event received", data);
+      }
+      if (data.event === "close") {
+        console.log("twilio: Close event received:", data);
+        this.close();
+      }
+    } else if (message.type === "binary") {
+      console.log("twilio: binary message received (not supported)");
     }
   }
 
   close() {
-    console.log("twilio: MediaStream closed.");
+    console.log("twilio: Closed");
   }
 }
 
-// ---------------------------------------------------------------------
-// FONCTION : LLM (OpenAI) => streaming
-// ---------------------------------------------------------------------
+/*
+  OpenAI Streaming LLM (invoqué dans Deepgram STT)
+*/
 async function promptLLM(mediaStream, prompt) {
   const stream = openai.beta.chat.completions.stream({
-    model: "gpt-3.5-turbo",
+    model: 'gpt-3.5-turbo',
     stream: true,
     messages: [
       {
-        role: "assistant",
-        content: `You are funny, everything is a joke to you.`,
+        role: 'assistant',
+        content: `You are funny, everything is a joke to you.`
       },
       {
-        role: "user",
-        content: prompt,
-      },
+        role: 'user',
+        content: prompt
+      }
     ],
   });
 
   speaking = true;
   let firstToken = true;
-
   for await (const chunk of stream) {
-    if (!speaking) break;
-    const chunkMessage = chunk.choices[0].delta.content;
-    if (chunkMessage) {
+    if (speaking) {
       if (firstToken) {
-        const duration = Date.now() - llmStart;
+        const end = Date.now();
+        const duration = end - llmStart;
         ttsStart = Date.now();
-        console.warn("\n>>> openai LLM: Time to First Token =", duration, "ms\n");
+        console.warn('\n>>> openai LLM: Time to First Token = ', duration, '\n');
         firstToken = false;
         firstByte = true;
       }
-      process.stdout.write(chunkMessage);
-
-      // Détection ponctuation => on enverra le TTS par "paquets"
-      if (!send_first_sentence_input_time && containsAnyChars(chunkMessage)) {
-        send_first_sentence_input_time = Date.now();
+      const chunk_message = chunk.choices[0].delta.content;
+      if (chunk_message) {
+        process.stdout.write(chunk_message);
+        if (!send_first_sentence_input_time && containsAnyChars(chunk_message)) {
+          send_first_sentence_input_time = Date.now();
+        }
+        mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: 'Speak', text: chunk_message }));
       }
-      // Envoi vers le websocket TTS
-      mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: "Speak", text: chunkMessage }));
     }
   }
-
-  // Flush final
-  mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: "Flush" }));
+  mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: 'Flush' }));
 }
 
 function containsAnyChars(str) {
   let strArray = Array.from(str);
-  return strArray.some((char) => chars_to_check.includes(char));
+  return strArray.some(char => chars_to_check.includes(char));
 }
 
-// ---------------------------------------------------------------------
-// FONCTION : Setup du Websocket TTS => Deepgram
-// ---------------------------------------------------------------------
-function setupDeepgramTTS(mediaStream) {
-  const url = process.env.DEEPGRAM_TTS_WS_URL || "wss://api.deepgram.com/v1/speak?encoding=mulaw&sample_rate=8000&container=none";
+/*
+  Deepgram Streaming Text to Speech WebSocket
+*/
+const setupDeepgramWebsocket = (mediaStream) => {
   const options = {
     headers: {
-      Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
-    },
+      Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+    }
   };
-  const ws = new WebSocket(url, options);
+  const ws = new WebSocket(deepgramTTSWebsocketURL, options);
 
-  ws.on("open", () => {
-    console.log("deepgram TTS: Connected");
+  ws.on('open', function open() {
+    console.log('deepgram TTS: Connected');
   });
 
-  ws.on("message", (data) => {
-    if (!speaking) return;
-    try {
-      let json = JSON.parse(data.toString());
-      console.log("deepgram TTS:", json);
-      // On peut ignorer la réponse JSON (metadata, etc.)
-    } catch (e) {
-      // Si ce n'est pas du JSON, on suppose que c'est de l'audio
+  ws.on('message', function incoming(data) {
+    if (speaking) {
+      try {
+        let json = JSON.parse(data.toString());
+        console.log('deepgram TTS (message JSON):', data.toString());
+        return;
+      } catch (e) {
+        // Ignorer les erreurs de parsing (le message est probablement binaire audio)
+      }
       if (firstByte) {
-        const duration = Date.now() - ttsStart;
-        console.warn("\n>>> deepgram TTS: Time to First Byte =", duration, "ms\n");
+        const end = Date.now();
+        const duration = end - ttsStart;
+        console.warn('\n\n>>> deepgram TTS: Time to First Byte = ', duration, '\n');
         firstByte = false;
         if (send_first_sentence_input_time) {
-          console.log(">>> deepgram TTS: TTFB from end of sentence token =", Date.now() - send_first_sentence_input_time, "ms");
+          console.log(`>>> deepgram TTS: Time to First Byte from end of sentence token = `, (end - send_first_sentence_input_time));
         }
       }
-      const payload = data.toString("base64");
+      // Envoyer l'audio (payload base64) vers Twilio via WebSocket
+      const payload = data.toString('base64');
       const message = {
-        event: "media",
+        event: 'media',
         streamSid: streamSid,
-        media: { payload },
+        media: { payload }
       };
-      mediaStream.connection.sendUTF(JSON.stringify(message));
+      const messageJSON = JSON.stringify(message);
+      mediaStream.connection.sendUTF(messageJSON);
     }
   });
 
-  ws.on("close", () => {
-    console.log("deepgram TTS: Disconnected.");
+  ws.on('close', function close() {
+    console.log('deepgram TTS: Disconnected from the WebSocket server');
   });
 
-  ws.on("error", (error) => {
-    console.error("deepgram TTS: Error:", error);
+  ws.on('error', function error(error) {
+    console.log("deepgram TTS: error received");
+    console.error(error);
   });
-
   return ws;
-}
+};
 
-// ---------------------------------------------------------------------
-// FONCTION : Setup du streaming STT => Deepgram
-// ---------------------------------------------------------------------
-function setupDeepgram(mediaStream) {
+/*
+  Deepgram Streaming Speech to Text
+*/
+const setupDeepgram = (mediaStream) => {
   let is_finals = [];
   const deepgram = deepgramClient.listen.live({
     model: "nova-2-phonecall",
@@ -363,13 +373,13 @@ function setupDeepgram(mediaStream) {
     no_delay: true,
     interim_results: true,
     endpointing: 300,
-    utterance_end_ms: 1000,
+    utterance_end_ms: 1000
   });
 
   if (keepAlive) clearInterval(keepAlive);
   keepAlive = setInterval(() => {
     deepgram.keepAlive();
-  }, 10000);
+  }, 10 * 1000);
 
   deepgram.addListener(LiveTranscriptionEvents.Open, async () => {
     console.log("deepgram STT: Connected");
@@ -386,16 +396,18 @@ function setupDeepgram(mediaStream) {
             llmStart = Date.now();
             promptLLM(mediaStream, utterance);
           } else {
-            console.log(`deepgram STT: [Is Final] ${transcript}`);
+            console.log(`deepgram STT:  [Is Final] ${transcript}`);
           }
         } else {
-          console.log(`deepgram STT: [Interim] ${transcript}`);
-
-          // Si l'agent est en train de parler, on "coupe" le TTS pour laisser l'utilisateur parler
+          console.log(`deepgram STT:    [Interim Result] ${transcript}`);
           if (speaking) {
-            console.log("twilio: clearing audio playback");
-            mediaStream.connection.sendUTF(JSON.stringify({ event: "clear", streamSid }));
-            mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: "Clear" }));
+            console.log('twilio: clear audio playback', streamSid);
+            const messageJSON = JSON.stringify({
+              event: "clear",
+              streamSid: streamSid
+            });
+            mediaStream.connection.sendUTF(messageJSON);
+            mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: 'Clear' }));
             speaking = false;
           }
         }
@@ -420,17 +432,24 @@ function setupDeepgram(mediaStream) {
     });
 
     deepgram.addListener(LiveTranscriptionEvents.Error, async (error) => {
-      console.log("deepgram STT: Error received:", error);
+      console.log("deepgram STT: error received");
+      console.error(error);
     });
 
     deepgram.addListener(LiveTranscriptionEvents.Warning, async (warning) => {
-      console.log("deepgram STT: Warning received:", warning);
+      console.log("deepgram STT: warning received");
+      console.warn(warning);
     });
 
     deepgram.addListener(LiveTranscriptionEvents.Metadata, (data) => {
-      console.log("deepgram STT: Metadata received:", data);
+      console.log("deepgram STT: metadata received:", data);
     });
   });
 
   return deepgram;
-}
+};
+
+// Démarrer le serveur HTTP
+wsserver.listen(HTTP_SERVER_PORT, function () {
+  console.log("Server listening on port %s", HTTP_SERVER_PORT);
+});
