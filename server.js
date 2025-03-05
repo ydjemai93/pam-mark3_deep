@@ -63,6 +63,7 @@ function parseJSONBody(req) {
     let body = "";
     req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => {
+      console.log("Body received:", body); // <-- Ajoutez ceci
       try {
         const data = JSON.parse(body);
         resolve(data);
@@ -115,6 +116,7 @@ dispatcher.onPost("/twiml", function (req, res) {
 // Pour lancer un appel sortant depuis votre agent IA vers un numéro utilisateur
 // ---------------------------------------------------------------------
 dispatcher.onPost("/outbound", async function (req, res) {
+   console.log(">>>> Received POST /outbound"); // <- Pour vérifier
   try {
     // On parse le body JSON
     const data = await parseJSONBody(req);
