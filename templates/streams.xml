@@ -6,5 +6,4 @@
       <Parameter name="aCustomParameter" value="aCustomValue that was set in TwiML" />
     </Stream>
   </Connect>
-   <Pause length="3600"/>
 </Response>
