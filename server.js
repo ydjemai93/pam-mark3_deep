@@ -25,8 +25,7 @@ const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 const deepgramClient = createClient(process.env.DEEPGRAM_API_KEY);
 const deepgramTTSWebsocketURL =
   process.env.DEEPGRAM_TTS_WS_URL ||
-  "wss://api.deepgram.com/v1/speak?language=fr-FR&encoding=mulaw&sample_rate=8000&container=none";
-
+  "wss://api.deepgram.com/v1/speak?encoding=mulaw&sample_rate=8000&container=none";
 
 // OpenAI
 const OpenAI = require("openai");
@@ -394,18 +393,3 @@ async function callGPT(mediaStream) {
       mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: "Speak", text: chunkMessage }));
     }
   }
-
-  // Flush
-  mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: "Flush" }));
-  // Ajouter la réplique
-  if (assistantReply.trim()) {
-    conversation.push({ role: "assistant", content: assistantReply });
-  }
-}
-
-//------------------------------------------
-// Lancement du serveur
-//------------------------------------------
-server.listen(PORT, () => {
-  console.log("Server listening on port", PORT);
-});
