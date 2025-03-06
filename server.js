@@ -393,3 +393,18 @@ async function callGPT(mediaStream) {
       mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: "Speak", text: chunkMessage }));
     }
   }
+
+  // Flush
+  mediaStream.deepgramTTSWebsocket.send(JSON.stringify({ type: "Flush" }));
+  // Ajouter la réplique
+  if (assistantReply.trim()) {
+    conversation.push({ role: "assistant", content: assistantReply });
+  }
+}
+
+//------------------------------------------
+// Lancement du serveur
+//------------------------------------------
+server.listen(PORT, () => {
+  console.log("Server listening on port", PORT);
+});
