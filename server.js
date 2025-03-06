@@ -25,7 +25,7 @@ const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 const deepgramClient = createClient(process.env.DEEPGRAM_API_KEY);
 const deepgramTTSWebsocketURL =
   process.env.DEEPGRAM_TTS_WS_URL ||
-  "wss://api.deepgram.com/v1/speak?encoding=mulaw&sample_rate=8000&container=none";
+  "https://api.deepgram.com/v1/listen?model=general&tier=enhanced&language=fr&punctuate=truespeak?encoding=mulaw&sample_rate=8000&container=none";
 
 // OpenAI
 const OpenAI = require("openai");
