@@ -254,7 +254,7 @@ function setupDeepgram(mediaStream) {
   let is_finals = [];
   const dgLive = deepgramClient.listen.live({
     model: "nova-2-general",
-    language: "fr",
+    language: "fr-FR",
     smart_format: true,
     encoding: "mulaw",
     sample_rate: 8000,
