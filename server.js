@@ -253,7 +253,7 @@ class MediaStream {
 function setupDeepgram(mediaStream) {
   let is_finals = [];
   const dgLive = deepgramClient.listen.live({
-    model: "nova-2-phonecall",
+    model: "nova-2",
     language: "fr",
     smart_format: true,
     encoding: "mulaw",
